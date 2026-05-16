@@ -128,15 +128,8 @@ def _load_primary(model_id: str | None = None, quant_bits: int = 0):
     effective_model = model_id or PRIMARY_MODEL
     quant_label = {0: "bf16", 4: "4bit", 8: "8bit"}.get(quant_bits, f"{quant_bits}bit")
 
-    candidates: list[str] = []
-    unsloth_alias = (
-        f"unsloth/{effective_model.split('/', 1)[1]}"
-        if not effective_model.startswith("unsloth/") and "/" in effective_model
-        else (f"unsloth/{effective_model}" if not effective_model.startswith("unsloth/") else effective_model.split("/", 1)[1])
-    )
-    for candidate in (effective_model, unsloth_alias):
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
+    # No unsloth-alias retry: Unsloth lowercases the repo internally, so a retry pulls a second ~60 GB copy. Set KERNELFORGE_MODEL to pick the mirror explicitly.
+    candidates: list[str] = [effective_model]
 
     last_error: Exception | None = None
     for candidate in candidates:
@@ -181,7 +174,7 @@ def _load_primary(model_id: str | None = None, quant_bits: int = 0):
     from peft import LoraConfig, TaskType, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    hf_model_name = effective_model.split("/", 1)[1] if effective_model.startswith("unsloth/") else effective_model
+    hf_model_name = effective_model
     tokenizer = AutoTokenizer.from_pretrained(hf_model_name, trust_remote_code=True)
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
