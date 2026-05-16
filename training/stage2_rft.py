@@ -128,12 +128,13 @@ def main():
         max_length=8192,
     )
 
+    # Dataset has `messages` field; TRL SFTTrainer auto-applies the chat template
+    # when it sees a conversational dataset, so we do not pass dataset_text_field.
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
         args=config,
         train_dataset=train_dataset,
-        dataset_text_field="text",
     )
 
     print("Starting Stage 2 SFT training on filtered trajectories...")
