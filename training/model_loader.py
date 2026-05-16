@@ -299,15 +299,30 @@ def _load_from_checkpoint(checkpoint_path: str, quant_bits: int = 0):
     if bnb_config is not None:
         ckpt_load_kwargs["quantization_config"] = bnb_config
 
+    # A PEFT/LoRA adapter directory contains adapter_config.json but no
+    # config.json — loading it directly as a full model fails. Detect this
+    # and load the base model from PRIMARY_MODEL, then apply the adapter.
+    is_peft_only_ckpt = (
+        os.path.isfile(os.path.join(checkpoint_path, "adapter_config.json"))
+        and not os.path.isfile(os.path.join(checkpoint_path, "config.json"))
+    )
+    base_for_model = PRIMARY_MODEL if is_peft_only_ckpt else checkpoint_path
+    if is_peft_only_ckpt:
+        print(f"PEFT-only checkpoint detected; loading base {PRIMARY_MODEL} then applying adapter from {checkpoint_path}")
+
     model = AutoModelForCausalLM.from_pretrained(
-        checkpoint_path,
+        base_for_model,
         **ckpt_load_kwargs,
     )
 
     try:
-        model = PeftModel.from_pretrained(model, checkpoint_path)
+        model = PeftModel.from_pretrained(model, checkpoint_path, is_trainable=True)
         print(f"Loaded PEFT adapter from {checkpoint_path}")
-    except Exception:
+    except Exception as exc:
+        if is_peft_only_ckpt:
+            raise RuntimeError(
+                f"Adapter dir {checkpoint_path} did not load as PEFT: {exc}"
+            ) from exc
         print(f"No PEFT adapter found, using base model from {checkpoint_path}")
 
     return model, tokenizer

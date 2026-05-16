@@ -45,6 +45,8 @@ USE_BF16 = IS_LINUX
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE1_MAX_TURNS", "3"))
 MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "100"))
 MAX_COMPLETION_LENGTH = int(os.getenv("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", "1024"))
+# EXP-003: optional warm-start from a Stage 2 SFT adapter checkpoint.
+INIT_CKPT = os.getenv("KERNELFORGE_STAGE1_INIT_CKPT", "") or None
 
 
 # --- Dataset loading ---
@@ -113,7 +115,9 @@ def main():
     print(f"  Max training steps: {MAX_STEPS}")
     print(f"  Max completion length: {MAX_COMPLETION_LENGTH}")
 
-    model, tokenizer = load_model_and_tokenizer()
+    if INIT_CKPT:
+        print(f"Warm-starting Stage 1 from checkpoint: {INIT_CKPT}")
+    model, tokenizer = load_model_and_tokenizer(checkpoint_path=INIT_CKPT)
     dataset = load_stage1_dataset()
     task_rows = [normalize_task_row(row) for row in dataset.to_list()]
 

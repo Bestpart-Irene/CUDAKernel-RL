@@ -46,6 +46,10 @@ trap on_term SIGTERM SIGINT
 # H200 141GB fits Qwen3-Coder-30B-A3B at bf16 with vLLM/GRPO headroom.
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 
+# EXP-003: warm-start from Stage 2 SFT adapter checkpoint.
+# Set to empty string to load base model instead.
+export KERNELFORGE_STAGE1_INIT_CKPT="${KERNELFORGE_STAGE1_INIT_CKPT:-outputs/kernelforge-stage2/checkpoint-50}"
+
 # Override cluster_paths.sh's default (local) — we are using remote A100 eval.
 export KERNELFORGE_EVAL_BACKEND=coreweave
 
