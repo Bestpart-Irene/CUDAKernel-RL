@@ -27,24 +27,29 @@ export KERNELFORGE_EVAL_BACKEND=coreweave
 # datasets/doublegraph_sft.jsonl. See research/experiments/EXP-002-stage2-sft-first.md.
 export KERNELFORGE_SKIP_RFT_COLLECTION="${KERNELFORGE_SKIP_RFT_COLLECTION:-1}"
 
-ADDRESS_FILE="${KF_SCRATCH_ROOT}/eval_server.address"
-echo "Waiting for eval server address at ${ADDRESS_FILE}..."
-for i in $(seq 1 60); do
-  if [ -s "${ADDRESS_FILE}" ]; then break; fi
-  sleep 10
-done
-if [ ! -s "${ADDRESS_FILE}" ]; then
-  echo "FATAL: eval server address not published after 10 min." >&2
-  exit 2
-fi
-EVAL_ADDR="$(cat "${ADDRESS_FILE}")"
-export KERNELFORGE_EVAL_URL="http://${EVAL_ADDR}"
+if [ "${KERNELFORGE_SKIP_RFT_COLLECTION}" = "1" ]; then
+  echo "KERNELFORGE_SKIP_RFT_COLLECTION=1 → SFT-only run; skipping eval server wait."
+  export KERNELFORGE_EVAL_URL="http://disabled:0"
+else
+  ADDRESS_FILE="${KF_SCRATCH_ROOT}/eval_server.address"
+  echo "Waiting for eval server address at ${ADDRESS_FILE}..."
+  for i in $(seq 1 60); do
+    if [ -s "${ADDRESS_FILE}" ]; then break; fi
+    sleep 10
+  done
+  if [ ! -s "${ADDRESS_FILE}" ]; then
+    echo "FATAL: eval server address not published after 10 min." >&2
+    exit 2
+  fi
+  EVAL_ADDR="$(cat "${ADDRESS_FILE}")"
+  export KERNELFORGE_EVAL_URL="http://${EVAL_ADDR}"
 
-echo "Waiting for eval server health..."
-for i in $(seq 1 60); do
-  if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then break; fi
-  sleep 10
-done
+  echo "Waiting for eval server health..."
+  for i in $(seq 1 60); do
+    if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then break; fi
+    sleep 10
+  done
+fi
 
 export WANDB_PROJECT="${KF_WANDB_PROJECT:-kernelforge}"
 export WANDB_NAME="stage2-${SLURM_JOB_ID:-local}"
