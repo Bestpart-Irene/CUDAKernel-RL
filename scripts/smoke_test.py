@@ -26,9 +26,11 @@ def main():
         assert compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "compile fail"
         assert compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "verify fail"
         r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.0, speedup_vs_compile=0.9)
-        assert abs(r - 0.0) < 1e-6, f"correct, no speedup: expected 0.0, got {r}"
+        assert abs(r - 1.0) < 1e-6, f"correct, no speedup: expected 1.0, got {r}"
         r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.0)
-        assert abs(r - math.log(2.0)) < 1e-4, f"2x speedup: expected {math.log(2.0)}, got {r}"
+        assert abs(r - 2.0) < 1e-6, f"2x speedup_vs_eager: expected 2.0, got {r}"
+        r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=2.0)
+        assert abs(r - 3.0) < 1e-6, f"2x speedup_vs_compile: expected 3.0, got {r}"
         # TRLOO post-process: N/(N-1) scaling
         scaled = trloo_post_process([0.5, -0.3, 1.2, -0.8], n=4)
         assert abs(scaled[0] - 0.5 * 4/3) < 1e-6, "TRLOO scaling"

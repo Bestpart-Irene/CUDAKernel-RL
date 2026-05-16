@@ -47,6 +47,13 @@ runs/
 .env.local
 .env.*
 
+# Claude Code local settings (track agents/ and skills/, ignore local-only)
+.claude/settings.local.json
+.claude/.session*
+
+# KernelForge experiment state (memory-keeper overwrites; ledger lives in results.tsv)
+research/live/
+
 # Misc
 *.log
 *.tmp
