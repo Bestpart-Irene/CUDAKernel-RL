@@ -125,7 +125,7 @@ def main():
         save_steps=50,
         bf16=USE_BF16,
         report_to="wandb",
-        max_seq_length=8192,
+        max_length=8192,
     )
 
     trainer = SFTTrainer(
