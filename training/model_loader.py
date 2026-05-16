@@ -123,15 +123,24 @@ def _make_bnb_config(quant_bits: int):
 
 def _load_primary(model_id: str | None = None, quant_bits: int = 0):
     """Load MoE model via Unsloth FastLanguageModel (supports MoE since 2026)."""
-    from unsloth import FastLanguageModel, PatchFastRL
-
     effective_model = model_id or PRIMARY_MODEL
     quant_label = {0: "bf16", 4: "4bit", 8: "8bit"}.get(quant_bits, f"{quant_bits}bit")
 
-    # No unsloth-alias retry: Unsloth lowercases the repo internally, so a retry pulls a second ~60 GB copy. Set KERNELFORGE_MODEL to pick the mirror explicitly.
-    candidates: list[str] = [effective_model]
-
-    last_error: Exception | None = None
+    # Unsloth fast path is upstream-broken for Qwen3 MoE (#3807, #3422), and its
+    # failing import monkey-patches the tokenizer's special tokens to placeholder
+    # strings like '<EOS_TOKEN>' / '<|PAD_TOKEN|>', which then poisons the
+    # Transformers fallback (SFTTrainer rejects '<EOS_TOKEN>' as not-in-vocab).
+    # Default to skipping Unsloth entirely; set KERNELFORGE_SKIP_UNSLOTH=0 to opt in.
+    skip_unsloth = os.getenv("KERNELFORGE_SKIP_UNSLOTH", "1") == "1"
+    if skip_unsloth:
+        print("KERNELFORGE_SKIP_UNSLOTH=1 → bypassing Unsloth, loading via Transformers + PEFT.")
+        last_error = None
+        candidates: list[str] = []
+    else:
+        from unsloth import FastLanguageModel, PatchFastRL
+        # No unsloth-alias retry: Unsloth lowercases the repo internally, so a retry pulls a second ~60 GB copy. Set KERNELFORGE_MODEL to pick the mirror explicitly.
+        candidates = [effective_model]
+        last_error = None
     for candidate in candidates:
         print(f"Loading primary model: {candidate} ({quant_label})")
         try:
@@ -252,22 +261,25 @@ def _load_from_checkpoint(checkpoint_path: str, quant_bits: int = 0):
     quant_label = {0: "bf16", 4: "4bit", 8: "8bit"}.get(quant_bits, f"{quant_bits}bit")
     print(f"Loading checkpoint: {checkpoint_path} ({quant_label})")
 
-    # Try Unsloth first (primary path)
-    try:
-        from unsloth import FastLanguageModel, PatchFastRL
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=checkpoint_path,
-            max_seq_length=MAX_SEQ_LENGTH,
-            load_in_4bit=(quant_bits == 4),
-        )
-        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.padding_side = "left"
-        PatchFastRL("GRPO", FastLanguageModel)
-        print(f"Loaded checkpoint via Unsloth: {checkpoint_path}")
-        return model, tokenizer
-    except Exception:
-        pass
+    # Try Unsloth first (primary path), unless KERNELFORGE_SKIP_UNSLOTH=1.
+    # Default skip=1 because Unsloth's Qwen3 MoE fast path is upstream-broken
+    # AND its failing import poisons the tokenizer's special tokens.
+    if os.getenv("KERNELFORGE_SKIP_UNSLOTH", "1") != "1":
+        try:
+            from unsloth import FastLanguageModel, PatchFastRL
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=checkpoint_path,
+                max_seq_length=MAX_SEQ_LENGTH,
+                load_in_4bit=(quant_bits == 4),
+            )
+            if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.padding_side = "left"
+            PatchFastRL("GRPO", FastLanguageModel)
+            print(f"Loaded checkpoint via Unsloth: {checkpoint_path}")
+            return model, tokenizer
+        except Exception:
+            pass
 
     # Fall back to HF + PEFT
     from transformers import AutoModelForCausalLM, AutoTokenizer
