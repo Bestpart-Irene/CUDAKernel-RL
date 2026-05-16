@@ -126,6 +126,7 @@ def main():
         bf16=USE_BF16,
         report_to="wandb",
         max_length=8192,
+        eos_token=tokenizer.eos_token,
     )
 
     # Dataset has `messages` field; TRL SFTTrainer auto-applies the chat template
