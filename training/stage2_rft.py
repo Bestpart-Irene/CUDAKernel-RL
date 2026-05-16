@@ -99,9 +99,20 @@ def main():
         f"filtered_trajectories={len(rft_rows)} -> total={len(combined_sft_rows)}"
     )
 
-    # Step 4: Load model from Stage 1 checkpoint and train
-    print(f"Loading Stage 1 checkpoint from {STAGE1_OUTPUT}...")
-    checkpoint_path = STAGE1_OUTPUT if os.path.exists(STAGE1_OUTPUT) else None
+    # Step 4: Load model from Stage 1 checkpoint and train.
+    # Treat the directory as a valid checkpoint only if it actually has a
+    # config.json — TRL creates the output dir at trainer init even when no
+    # save_steps ever fires, so a bare empty dir is not a checkpoint.
+    has_ckpt = (
+        os.path.exists(STAGE1_OUTPUT)
+        and os.path.isfile(os.path.join(STAGE1_OUTPUT, "config.json"))
+    )
+    checkpoint_path = STAGE1_OUTPUT if has_ckpt else None
+    print(
+        f"Loading Stage 1 checkpoint from {STAGE1_OUTPUT}..."
+        if has_ckpt
+        else f"No Stage 1 checkpoint at {STAGE1_OUTPUT} (or dir empty) — loading base model."
+    )
     model, tokenizer = load_model_and_tokenizer(checkpoint_path=checkpoint_path)
 
     config = SFTConfig(
