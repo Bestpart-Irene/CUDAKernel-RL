@@ -22,6 +22,10 @@ mkdir -p "${REPO_ROOT}/logs"
 
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 export KERNELFORGE_EVAL_BACKEND=coreweave
+# EXP-002: SFT-first reorder. Skips broken RFT trajectory collection
+# (requires non-existent Stage 1 checkpoint) and trains SFT directly on
+# datasets/doublegraph_sft.jsonl. See research/experiments/EXP-002-stage2-sft-first.md.
+export KERNELFORGE_SKIP_RFT_COLLECTION="${KERNELFORGE_SKIP_RFT_COLLECTION:-1}"
 
 ADDRESS_FILE="${KF_SCRATCH_ROOT}/eval_server.address"
 echo "Waiting for eval server address at ${ADDRESS_FILE}..."

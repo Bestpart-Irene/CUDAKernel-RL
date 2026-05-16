@@ -30,6 +30,10 @@ STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stag
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
 NUM_TRAJECTORIES = int(os.getenv("KERNELFORGE_RFT_TRAJECTORIES", "50"))
 MIN_REWARD = float(os.getenv("KERNELFORGE_RFT_MIN_REWARD", "1.0"))
+# EXP-002: when set, skip the broken RFT collection path (requires a Stage 1
+# checkpoint that does not exist at cold start) and train SFT directly on
+# the doubleGraph expert demos. Default 0 preserves byte-identical behavior.
+SKIP_RFT_COLLECTION = os.getenv("KERNELFORGE_SKIP_RFT_COLLECTION", "0") == "1"
 USE_BF16 = sys.platform.startswith("linux")
 
 
@@ -63,21 +67,30 @@ def main():
     """Run Stage 2: collect trajectories, filter, SFT."""
     print("=== Stage 2: Rejection Fine-Tuning ===")
 
-    # Step 1: Collect trajectories using Stage 1 model
-    print(f"Collecting {NUM_TRAJECTORIES} trajectories from {STAGE1_OUTPUT}...")
-    collector = TrajectoryCollector(model_path=STAGE1_OUTPUT)
-    collector.collect_trajectories(num_trajectories=NUM_TRAJECTORIES)
+    if SKIP_RFT_COLLECTION:
+        print(
+            "=== KERNELFORGE_SKIP_RFT_COLLECTION=1 — skipping RFT trajectory "
+            "collection, training on doubleGraph SFT only ==="
+        )
+        filtered: list[dict[str, Any]] = []
+        rft_rows: list[dict[str, Any]] = []
+    else:
+        # Step 1: Collect trajectories using Stage 1 model
+        print(f"Collecting {NUM_TRAJECTORIES} trajectories from {STAGE1_OUTPUT}...")
+        collector = TrajectoryCollector(model_path=STAGE1_OUTPUT)
+        collector.collect_trajectories(num_trajectories=NUM_TRAJECTORIES)
 
-    # Step 2: Filter
-    filtered = collector.filter_trajectories(min_reward=MIN_REWARD)
-    if not filtered:
-        print("No trajectories met quality threshold! Cannot proceed with Stage 2.")
-        return
+        # Step 2: Filter
+        filtered = collector.filter_trajectories(min_reward=MIN_REWARD)
+        if not filtered:
+            print("No trajectories met quality threshold! Cannot proceed with Stage 2.")
+            return
 
-    # Step 3: Save filtered dataset
-    os.makedirs("datasets", exist_ok=True)
-    rft_dataset = collector.save_rft_dataset(filtered, "datasets/rft_filtered.jsonl")
-    rft_rows = rft_dataset.to_list() if hasattr(rft_dataset, "to_list") else list(rft_dataset)
+        # Step 3: Save filtered dataset
+        os.makedirs("datasets", exist_ok=True)
+        rft_dataset = collector.save_rft_dataset(filtered, "datasets/rft_filtered.jsonl")
+        rft_rows = rft_dataset.to_list() if hasattr(rft_dataset, "to_list") else list(rft_dataset)
+
     dg_sft_rows = _load_doublegraph_sft_rows()
     combined_sft_rows = dg_sft_rows + rft_rows
     train_dataset = _dataset_from_rows(combined_sft_rows)
@@ -100,7 +113,7 @@ def main():
         logging_steps=1,
         save_steps=50,
         bf16=USE_BF16,
-        report_to="none",
+        report_to="wandb",
         max_seq_length=8192,
     )
 
@@ -120,10 +133,13 @@ def main():
     print(f"Stage 2 complete. Checkpoint saved to {OUTPUT_DIR}")
 
     # Print stats
-    rewards = [t["reward"] for t in filtered]
-    print(f"RFT stats: {len(filtered)} trajectories, "
-          f"rewards min={min(rewards):.1f} max={max(rewards):.1f} "
-          f"mean={sum(rewards)/len(rewards):.2f}")
+    if filtered:
+        rewards = [t["reward"] for t in filtered]
+        print(f"RFT stats: {len(filtered)} trajectories, "
+              f"rewards min={min(rewards):.1f} max={max(rewards):.1f} "
+              f"mean={sum(rewards)/len(rewards):.2f}")
+    else:
+        print("RFT stats: 0 trajectories (SKIP_RFT_COLLECTION=1, SFT-only run).")
 
 
 if __name__ == "__main__":

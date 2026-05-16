@@ -19,4 +19,21 @@ managed run fails or regresses in a way that is not just noise.
 
 ## Entries
 
-_(empty — first ruled-out hypothesis will land below)_
+## 2026-05-16 — Stage 1 GRPO directly on non-SFT'd base Qwen3-Coder-30B-A3B
+
+- what was tried: Cold-start Stage 1 GRPO warm-up (G=2, 100 steps,
+  max_completion_length=1024, max_turns=3, v1-discrete-milestone reward)
+  on base `Qwen/Qwen3-Coder-30B-A3B-Instruct` with no prior SFT.
+- why it failed: Base model emits zero parseable ```cuda blocks in 1024
+  tokens. All rollouts hit clipped_ratio=1.0 with mean_terminated_length=0,
+  compile_failed → reward=-1 constant, reward_std=0, frac_reward_zero_std=1.0,
+  advantage=0, grad_norm=0. GRPO is mathematically correct but has no
+  signal. Entropy collapsed to 0.15 within 13 steps. wandb run qll2wvnl,
+  slurm 6858988, scancel'd at step 13 / ~5h wall-clock.
+- evidence: EXP-001 (no results.tsv row — cancelled before completion).
+- conditions under which it could be revisited: only after an SFT pass on
+  `datasets/doublegraph_sft.jsonl` (or equivalent CUDA-kernel format
+  corpus) lifts p(valid_cuda_block) above ~0.05 per rollout. Until then,
+  do not propose Stage 1 GRPO from a raw base checkpoint regardless of
+  LR / G / temperature / max_completion_length sweeps — none of those
+  knobs fix a zero-signal reward distribution.
