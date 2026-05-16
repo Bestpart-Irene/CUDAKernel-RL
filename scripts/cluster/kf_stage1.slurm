@@ -50,32 +50,53 @@ export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 # Set to empty string to load base model instead.
 export KERNELFORGE_STAGE1_INIT_CKPT="${KERNELFORGE_STAGE1_INIT_CKPT:-outputs/kernelforge-stage2/checkpoint-50}"
 
-# Override cluster_paths.sh's default (local) — we are using remote A100 eval.
-export KERNELFORGE_EVAL_BACKEND=coreweave
+# =============================================================================
+# VERIFICATION PHASE — DIAGNOSTIC ONLY, NOT MASTER-PROMOTION-ELIGIBLE
+# =============================================================================
+# Default backend is `local` (eval runs in-process on the SAME H200 as training)
+# because A100 capacity on NU Explorer is unreliable. Reward speedup numbers
+# from local-H200 eval are NOT comparable to A100 baselines:
+#   - H200 (sm_90) ≠ A100 (sm_80) — different bandwidth, SM count, compile target
+#   - doubleGraph expert kernels were tuned for A100
+#   - PyTorch eager/compile is also faster on H200, so speedup ratios shift
+# This run answers ONLY two binary questions:
+#   1. Does SFT prior give GRPO non-zero reward variance? (reward_std > 0)
+#   2. Does grad_norm > 0 (model is actually learning)?
+# Any speedup_vs_orig / pass_rate / fast_p numbers reported here are NOT to
+# be promoted into research/live/master.json. The A100-comparable cold-start
+# is a separate future run with KERNELFORGE_EVAL_BACKEND=coreweave.
+# Set KERNELFORGE_EVAL_BACKEND=coreweave externally to override for that run.
+# =============================================================================
+export KERNELFORGE_EVAL_BACKEND="${KERNELFORGE_EVAL_BACKEND:-local}"
 
-# Resolve EVAL_URL from the eval server's published address.
-ADDRESS_FILE="${KF_SCRATCH_ROOT}/eval_server.address"
-echo "Waiting for eval server address at ${ADDRESS_FILE}..."
-for i in $(seq 1 60); do
-  if [ -s "${ADDRESS_FILE}" ]; then break; fi
-  sleep 10
-done
-if [ ! -s "${ADDRESS_FILE}" ]; then
-  echo "FATAL: eval server address not published after 10 min." >&2
-  echo "  Did you sbatch scripts/cluster/kf_eval_server.slurm first?" >&2
-  exit 2
-fi
-EVAL_ADDR="$(cat "${ADDRESS_FILE}")"
-export KERNELFORGE_EVAL_URL="http://${EVAL_ADDR}"
-
-echo "Waiting for eval server health at ${KERNELFORGE_EVAL_URL}/health..."
-for i in $(seq 1 60); do
-  if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then
-    echo "Eval server healthy."
-    break
+if [ "${KERNELFORGE_EVAL_BACKEND}" = "local" ]; then
+  echo "VERIFICATION PHASE: KERNELFORGE_EVAL_BACKEND=local — skipping eval server wait."
+  export KERNELFORGE_EVAL_URL="http://disabled:0"
+else
+  # Production (A100-comparable) path: wait for the FastAPI eval server.
+  ADDRESS_FILE="${KF_SCRATCH_ROOT}/eval_server.address"
+  echo "Waiting for eval server address at ${ADDRESS_FILE}..."
+  for i in $(seq 1 60); do
+    if [ -s "${ADDRESS_FILE}" ]; then break; fi
+    sleep 10
+  done
+  if [ ! -s "${ADDRESS_FILE}" ]; then
+    echo "FATAL: eval server address not published after 10 min." >&2
+    echo "  Did you sbatch scripts/cluster/kf_eval_server.slurm first?" >&2
+    exit 2
   fi
-  sleep 10
-done
+  EVAL_ADDR="$(cat "${ADDRESS_FILE}")"
+  export KERNELFORGE_EVAL_URL="http://${EVAL_ADDR}"
+
+  echo "Waiting for eval server health at ${KERNELFORGE_EVAL_URL}/health..."
+  for i in $(seq 1 60); do
+    if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then
+      echo "Eval server healthy."
+      break
+    fi
+    sleep 10
+  done
+fi
 
 export WANDB_PROJECT="${KF_WANDB_PROJECT:-kernelforge}"
 export WANDB_NAME="stage1-${SLURM_JOB_ID:-local}"
