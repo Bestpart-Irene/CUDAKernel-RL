@@ -103,7 +103,12 @@ def main() -> None:
         return
     print(f"  ✅ compiled successfully via nvcc -arch=sm_80")
 
-    print("\n[6/6] evaluate_code_remote() through eval_backend=local...")
+    # Save the candidate code for offline inspection
+    code_path = "/tmp/debug_candidate_kernel.cu"
+    with open(code_path, "w") as fh:
+        fh.write(code)
+    print(f"\n[6/6] Candidate code saved to {code_path} for offline inspection.")
+    print("      Running evaluate_code_remote() through eval_backend=local...")
     from training.multi_turn_rollout import evaluate_code_remote
     try:
         result = evaluate_code_remote(
@@ -121,15 +126,17 @@ def main() -> None:
         print(f"  speedup_vs_orig: {speedup_orig}, speedup_vs_compile: {speedup_compile}")
         err = result.get("error")
         if err:
-            print(f"  ❌ eval reported error: {err[:400]}")
-            print("  Hypothesis B candidate: eval path runs but kernel fails at exec.")
+            print(f"  ❌ eval reported error (full):")
+            print("  " + "\n  ".join(str(err).split("\n")))
         elif result.get("correct"):
-            print("  ✅ eval reported CORRECT — reward chain works, just first roll lucky.")
+            print("  ✅ eval reported CORRECT — reward chain works.")
         else:
             print("  ❌ eval succeeded but kernel produced wrong output.")
     except Exception as exc:
-        print(f"  ❌ evaluate_code_remote raised: {exc}")
-        print("  This is hypothesis B: local eval dispatch is broken on this stack.")
+        import traceback
+        print(f"  ❌ evaluate_code_remote raised: {type(exc).__name__}: {exc}")
+        print("  --- traceback ---")
+        traceback.print_exc()
 
     print("\n" + "=" * 72)
     print("Done. Verdict above tells us which hypothesis (A or B) explains EXP-003 reward=-1.")
