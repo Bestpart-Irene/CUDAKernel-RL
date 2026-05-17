@@ -26,6 +26,14 @@ def validate_eval_result(result: dict) -> dict:
     return out
 
 
+# EXP-005: KERNELFORGE_REWARD_VERSION selects reward shape.
+#   v1-discrete-milestone: legacy binary — compiled_but_wrong → -1.0 (same as compile fail).
+#   v2-shaped (default):    compiled_but_wrong → 0.0 so GRPO groups can have non-zero variance.
+# Default kept at v2-shaped because v1 is empirically a dead-end on this stack.
+import os as _os
+_REWARD_VERSION = _os.getenv("KERNELFORGE_REWARD_VERSION", "v2-shaped").strip()
+
+
 def compute_reward(
     compiled: bool,
     correct: bool,
@@ -64,8 +72,12 @@ def compute_reward(
     if not compiled:
         return -1.0
     if not correct:
-        # v2-shaped: compile-pass alone is a partial signal. Kevin (arXiv
-        # 2507.11948) shows this unlocks small-model GRPO cold-start.
+        if _REWARD_VERSION == "v1-discrete-milestone":
+            # Legacy binary: lumps compiled_but_wrong with compile_failed.
+            return -1.0
+        # v2-shaped (default): compile-pass alone is a partial signal.
+        # Kevin (arXiv 2507.11948) shows this unlocks small-model GRPO
+        # cold-start; EXP-004 v3 confirmed on this stack.
         return 0.0
 
     # Discrete milestones (highest matching tier wins)
