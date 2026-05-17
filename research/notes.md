@@ -71,4 +71,180 @@ testing scientific hypotheses about the RL pipeline.
 
 ## Entries
 
-_(empty — first run will land below)_
+## 2026-05-17 — EXP-001 — stage1 raw GRPO baseline (no SFT)
+
+- hypothesis: base Qwen3-Coder-30B-A3B-Instruct + Stage 1 GRPO on 19 mixed
+  (15 ops6k + 4 wcc) tasks can produce *any* reward variance.
+- parent master hash: null
+- variable changed: none (baseline)
+- runner / job id: explorer-h200 / slurm 6858988 (scancel @ step 13)
+- metrics: reward=-1, reward_std=0, grad_norm=0, clipped_ratio=1.0,
+  mean_terminated_length=0, entropy collapsed 0.15
+- decision: no-promote — cold-start exploration failure
+- interpretation: base model emits zero parseable ```cuda blocks in 1024
+  tokens. Every G=2 group has zero reward variance → advantage=0 →
+  grad_norm=0 → policy never moves. The failure family is "Stage 1 GRPO
+  from raw base on sparse-binary outcome reward". Confirmed in `do-not-repeat`.
+
+## 2026-05-17 — EXP-002 — stage2 SFT on doubleGraph 192
+
+- hypothesis: SFT on 192 doubleGraph A100 expert kernels produces a
+  converged checkpoint usable as Stage 1 warm-start.
+- parent master hash: null
+- variable changed: pipeline order, doubleGraph kernels as SFT corpus.
+- runner / job id: explorer-h200 / slurm 6868569 (FAILED exit 120 post-save
+  at step 50 — bug in TRL ≥0.29 post-save hooks; ckpt-50 intact)
+- metrics: train/loss 2.5→0.5 over 50 steps, grad_norm 0.17-0.31,
+  mean_token_accuracy 0.87
+- decision: no-promote — SFT-only run; produces ckpt artifact, not RL metrics.
+- interpretation: SFT mechanism works. Adapter `adapter_model.safetensors`
+  (3.38 GB LoRA) saved at `outputs/kernelforge-stage2/checkpoint-50/`.
+  Subsequent Stage 1 runs (EXP-003 v1/v2/v3) all warm-start from this.
+
+## 2026-05-17 — EXP-003-v1 — stage1 GRPO + doubleGraph ckpt + ops6k+wcc
+
+- hypothesis: doubleGraph-SFT'd model unlocks GRPO reward signal on the
+  mixed Stage 1 task pool (15 ops6k + 4 wcc).
+- parent master hash: null
+- variable changed: KERNELFORGE_STAGE1_INIT_CKPT = outputs/kernelforge-stage2/checkpoint-50
+- runner / job id: explorer-h200 / slurm 6869808 (3 steps)
+- metrics: reward=-1, reward_std=0, grad_norm=0
+- decision: no-promote — contract domain mismatch
+- interpretation: doubleGraph SFT teaches WCC void contract
+  `void wcc_kernel(row_ptr, col_idx, num_vertices, labels)`. ops6k tasks
+  require `torch::Tensor run_kernel(torch::Tensor)`. EXP-004 debug
+  (slurm 6870504) showed model writes `void run_kernel(output, ...)` —
+  the F1 prompt hardcode (committed then reverted) could not override
+  the SFT bias. Family ruled out: "doubleGraph WCC void-contract SFT
+  for ops6k Tensor-return tasks" regardless of prompt engineering.
+
+## 2026-05-17 — EXP-003-v2 — stage1 GRPO + sakana 200 ckpt + ops6k+wcc
+
+- hypothesis: Sakana 200 SFT (ops6k contract, AI-CUDA-Engineer-Archive)
+  unlocks ops6k reward signal.
+- parent master hash: null
+- variable changed: SFT corpus + ckpt path
+- runner / job id: explorer-h200 / slurm 6872320 (4 steps)
+- metrics: reward=-1, reward_std=0, grad_norm=0, clipped_ratio=1.0,
+  mean_terminated_length=0
+- decision: no-promote — output-length blow-up
+- interpretation: Sakana 200 corpus has assistant CUDA bodies averaging
+  ~4000 chars (~1200 tokens). SFT'd model reproduces that length under
+  sampling. Stage 1 max_completion_length=1024 cuts every generation.
+  Family ruled out: "Sakana CUDA Engineer SFT without a token-length
+  filter at max_completion ≤1024". Re-attempt only after filtering to
+  <800 tokens (D4-pending).
+
+## 2026-05-17 — EXP-003-v3 (D6) — stage1 GRPO + doubleGraph ckpt + wcc-only
+
+- hypothesis: aligning Stage 1 task domain to SFT contract (filter to 4
+  WCC tasks) unlocks reward signal because doubleGraph SFT teaches WCC
+  void contract end-to-end.
+- parent master hash: null
+- variable changed: KERNELFORGE_STAGE1_BACKEND_FILTER=wcc
+- runner / job id: explorer-h200 / slurm 6872638 (6 steps, walltime'd)
+- metrics: reward=-1, reward_std=0, grad_norm=0, clipped_ratio=0.5,
+  mean_terminated_length=772 (model produces well-formed code at length)
+- decision: no-promote — initial diagnosis "SFT teaches format but not
+  algorithm correctness" was **incomplete**.
+- interpretation: EXP-004 v3 follow-up (slurm 6876541) exposed 4
+  infrastructure bugs that were silently masking the real story:
+  - slurm did not `module load cuda/12.8.0` → eval_core nvcc subprocess
+    raised FileNotFoundError on every rollout
+  - `_local_compile_check` swallowed FileNotFoundError and returned
+    "compile succeeded" — lying to the rollout loop
+  - `extract_cuda_code` regex left the opening ``` fence when closing
+    fence was truncated by max_new_tokens
+  - Stage 2 left empty `outputs/kernelforge-stage1/` mistaken for a ckpt
+  All four fixed in commits 5b5db65, 75e34f1, e115cf6, ed628a9.
+  D6's reward=-1 verdict thus **cannot** be attributed to "SFT can't
+  teach correctness" — most of the -1 was infra. Hypothesis needs re-test.
+
+## 2026-05-17 — EXP-004 v1/v2/v3 — single-rollout failure-bucket probes
+
+- hypothesis: identify which bucket inside compute_reward's -1 branch
+  (compile_failed / compiled_but_wrong / anti_hack / eval_crash) is
+  firing for each of the 4 WCC tasks.
+- parent master hash: null
+- variable changed: scripts/debug_eval_pipeline.py (4 WCC tasks × 1 rollout,
+  no GRPO training)
+- runner / job id: explorer-h200 / slurm 6870504 (v1), 6870925 (v2),
+  6874203 (v2-buggy), 6875257 (v2 post-nvcc-fix), 6876541 (v3 post-fence-fix)
+- metrics (v3 final): compile_failed=2 (real syntax errors), compiled_but_wrong=2
+- decision: diagnostic — produced the smoking gun on infra bugs above.
+- interpretation: this was the highest-leverage hour of the night.
+  Single-rollout probes exposed cascading infra bugs that 5 prior GRPO
+  runs had attributed to "RL can't learn". Generalizable rule:
+  **before pinning a reward=-1 finding on RL/SFT science, dispatch a
+  single-rollout debug that prints extract/compile/eval verdicts**.
+  Captured in `do-not-repeat`.
+
+## 2026-05-17 — EXP-005 / v4 / v6 — shaped reward and GRPO knob A/B/C
+
+- hypothesis: with infra fixed (commits ed628a9, 75e34f1, b7c5bc0),
+  shaped reward (v2-shaped: compiled_but_wrong=0.0) and/or larger G + no
+  KL pin unlocks reward_std>0.
+- parent master hash: null
+- variable changed (3-way A/B/C):
+  - v5 (slurm 6880035): reward v2-shaped, G=2, beta=0.04 default
+  - v4 (slurm 6880846): reward v1-discrete-milestone, G=2, beta=0.04
+  - v6 (slurm 6881355): reward v2-shaped, G=4, beta=0.0
+- runner / job id: explorer-h200 × 3 parallel
+- metrics: ALL three runs — reward=-1 unique, reward_std=0, grad_norm=0
+  across 50/51 steps each (walltime'd). Total ~1200+ rollouts.
+- decision: no-promote — the entire 3-way A/B/C produced identical
+  reward distribution. Either v2-shaped is not reaching the GRPO reward
+  path, or the downstream chain rejects every completion uniformly.
+- interpretation: this is the puzzle. EXP-004 v3 single-rollout showed
+  2/4 tasks hit compiled_but_wrong, which under v2-shaped should produce
+  reward=0.0 in v5. Instead all 200+ v5 rollouts return reward=-1. Two
+  candidate explanations:
+  - (Q1) v2-shaped does not reach evaluate_code_remote's reward
+    assignment in the GRPO context (module caching / wrong path)
+  - (Q2) The GRPO multi-turn rollout context produces different model
+    outputs than the debug script, and all 200 rollouts genuinely fail
+    extract/compile before reaching eval
+  EXP-S4 (debug_eval rerun on v2-shaped default) and EXP-D1 (wandb
+  detailed metrics) both run today address Q1/Q2 respectively.
+
+## 2026-05-17 — EXP-D1 — 2-step verbose stage1 + rollout_debug
+
+- hypothesis: per-rollout stdout prints expose which bucket (extract /
+  compile / eval) is firing at the GRPO multi-turn level.
+- parent master hash: null
+- variable changed: KERNELFORGE_ROLLOUT_DEBUG=1, max_steps=2 (env)
+- runner / job id: explorer-h200 / slurm 6885765 (2 steps complete)
+- metrics: ROLLOUT_DEBUG env var did NOT propagate (no `[ROLLOUT` lines
+  in stdout) — separate bug. But wandb metric dict revealed:
+  - step 1: clipped_ratio=0.25, mean_terminated_length=706 (75% complete!)
+  - step 2: clipped_ratio=1.0, mean_terminated_length=0 (full degeneration)
+- decision: diagnostic — KEY finding for the open puzzle.
+- interpretation: TWO independent findings:
+  1. **Multi-turn feedback degrades context budget**. Turn N's error
+     feedback append makes Turn N+1's effective max_completion shrink.
+     By step 2 every completion is truncated. Family-level rule: at
+     max_turns=3 with feedback-append, this run config self-poisons
+     across steps. Mitigations: lower max_turns or refactor feedback to
+     replace-not-append.
+  2. **75% complete completions in step 1 also return reward=-1**.
+     This rules out "truncation is the sole bottleneck". Even when the
+     model writes well-formed code that naturally EOSes, reward stays
+     -1. This forces investigation into the downstream chain (extract
+     / compile / eval correctness) — not into max_completion bumps,
+     not into reward shape alone.
+
+## 2026-05-17 — EXP-S4 — single-rollout reward-version verification (PENDING)
+
+- hypothesis: under v2-shaped reward (default), single-rollout
+  compiled_but_wrong bucket returns reward_in_result=0.0 (was -1.0
+  under v1 in slurm 6876541). Confirms or refutes Q1 above.
+- parent master hash: null
+- variable changed: rerun debug_eval_pipeline.py (no code change vs v3)
+- runner / job id: explorer-h200 / slurm 6885946 (PENDING at notes time)
+- metrics: TBD
+- decision: TBD
+- interpretation: cheap-kill probe. If reward_in_result=0.0 → v2-shaped
+  reaches evaluate_code_remote correctly → the 3-way A/B/C results stand
+  as evidence against reward-shape alone. If reward_in_result=-1.0 →
+  reward.py edit doesn't reach GRPO trainer's reward path → all EXP-005
+  comparisons are invalid (effectively all v1).
