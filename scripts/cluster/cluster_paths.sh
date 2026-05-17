@@ -30,6 +30,30 @@ KF_CHECKPOINTS="${KF_CHECKPOINTS:-${KF_SCRATCH_ROOT}/checkpoints}"
 KF_LOGS="${KF_LOGS:-${KF_SCRATCH_ROOT}/logs}"
 KF_EVAL_ARTIFACTS="${KF_EVAL_ARTIFACTS:-${KF_SCRATCH_ROOT}/eval_artifacts}"
 
+# --- CUDA toolkit (nvcc) on PATH for compile / eval --------------------------
+# Slurm shell does not inherit login-shell module state, and our previous
+# slurm scripts never loaded the cuda module, so eval_service/eval_core.py
+# subprocess.run(["nvcc", ...]) failed with FileNotFoundError. EXP-004
+# debug (slurm 6874203) caught this — _local_compile_check was silently
+# swallowing the same FileNotFoundError as "success", masking the bug for
+# every GRPO run in EXP-001..EXP-003. Load the module here so every slurm
+# job that sources cluster_paths.sh gets nvcc on PATH and CUDA_HOME set.
+KF_CUDA_MODULE="${KF_CUDA_MODULE:-cuda/12.8.0}"
+if command -v module >/dev/null 2>&1; then
+    module load "${KF_CUDA_MODULE}" 2>/dev/null || true
+fi
+# Defensive fallback if `module` is unavailable (e.g. interactive non-Lmod shell).
+export CUDA_HOME="${CUDA_HOME:-/shared/EL9/explorer/cuda/12.8.0}"
+export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
+case ":${PATH}:" in
+    *":${CUDA_HOME}/bin:"*) ;;
+    *) export PATH="${CUDA_HOME}/bin:${PATH}" ;;
+esac
+case ":${LD_LIBRARY_PATH:-}:" in
+    *":${CUDA_HOME}/lib64:"*) ;;
+    *) export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}" ;;
+esac
+
 # --- WandB / job naming ---------------------------------------------------
 KF_WANDB_PROJECT="${KF_WANDB_PROJECT:-kernelforge}"
 # Slurm job-name prefix; every job in this project starts with kf_*

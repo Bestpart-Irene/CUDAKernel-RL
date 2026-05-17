@@ -88,11 +88,14 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
             return False, proc.stderr[:1000]
         return True, ""
     except FileNotFoundError:
-        return True, ""
+        # nvcc not in PATH — surface this loudly instead of pretending compile
+        # succeeded. EXP-004 (slurm 6874203) caught this masking eval_core
+        # failures across EXP-001..EXP-003 GRPO rollouts.
+        return False, "nvcc not in PATH — load CUDA module / set CUDA_HOME"
     except subprocess.TimeoutExpired:
         return False, "Local compile timed out (15s)"
-    except Exception:
-        return True, ""
+    except Exception as exc:
+        return False, f"Local compile raised: {type(exc).__name__}: {exc}"
 
 
 def _compute_reward_from_result(result: dict) -> float:
