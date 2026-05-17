@@ -51,6 +51,9 @@ INIT_CKPT = os.getenv("KERNELFORGE_STAGE1_INIT_CKPT", "") or None
 # Defaults match the original config (G=2, TRL default beta=0.04).
 NUM_GENERATIONS = int(os.getenv("KERNELFORGE_STAGE1_NUM_GENERATIONS", "2"))
 BETA = float(os.getenv("KERNELFORGE_STAGE1_BETA", "0.04"))
+# EXP-008 C: TRL 0.29 loss_type — "dapo" (default), "grpo", "gspo".
+# GSPO addresses Qwen3 MoE token-level GRPO instability (Qwen team's own paper).
+LOSS_TYPE = os.getenv("KERNELFORGE_GRPO_LOSS_TYPE", "dapo")
 
 
 # --- Dataset loading ---
@@ -158,6 +161,7 @@ def main():
         temperature=1.0,         # High exploration
         num_generations=NUM_GENERATIONS,
         beta=BETA,
+        loss_type=LOSS_TYPE,
         max_completion_length=MAX_COMPLETION_LENGTH,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
