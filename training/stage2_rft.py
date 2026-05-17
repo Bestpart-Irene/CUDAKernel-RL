@@ -41,6 +41,8 @@ SKIP_RFT_COLLECTION = os.getenv("KERNELFORGE_SKIP_RFT_COLLECTION", "0") == "1"
 #                            return contract). Use this for Stage 1 ops6k
 #                            warm-starts.
 SFT_DATA_SOURCE = os.getenv("KERNELFORGE_SFT_DATA_SOURCE", "doublegraph")
+# EXP-007 D4: cap epochs for large SFT corpora that would exceed 8h walltime.
+STAGE2_EPOCHS = float(os.getenv("KERNELFORGE_STAGE2_EPOCHS", "3"))
 USE_BF16 = sys.platform.startswith("linux")
 
 
@@ -155,7 +157,7 @@ def main():
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         learning_rate=5e-6,
-        num_train_epochs=3,
+        num_train_epochs=STAGE2_EPOCHS,
         logging_steps=1,
         save_steps=50,
         bf16=USE_BF16,
