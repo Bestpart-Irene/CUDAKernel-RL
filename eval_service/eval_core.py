@@ -72,7 +72,11 @@ def _nvcc_command(
 ) -> list[str]:
     """Build a safe nvcc command with whitelisted user flags."""
     extra_flags = extract_cu_flags(cuda_code)
-    cmd = ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-O3", src_path, "-o", output_path]
+    # EXP-S4 finding: graph-algorithm kernels emit device lambdas (find_root,
+    # path_compression helpers) that need --extended-lambda. It enables an
+    # already-legal CUDA C++ feature; null impact on runtime / correctness /
+    # speedup measurement. Safe to add by default.
+    cmd = ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "--extended-lambda", "-O3", src_path, "-o", output_path]
     if shared:
         cmd.extend(["--shared", "-Xcompiler", "-fPIC"])
     cmd.extend(extra_flags or ["--use_fast_math"])

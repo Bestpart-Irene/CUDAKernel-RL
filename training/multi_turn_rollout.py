@@ -83,8 +83,11 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
             cu_path = f.name
 
         obj_path = cu_path.replace(".cu", ".o")
+        # EXP-S4 finding: WCC kernels use device lambdas (find_root etc) which
+        # require --extended-lambda. Add as default so local gate matches what
+        # eval_core also needs.
         proc = subprocess.run(
-            ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-c", cu_path, "-o", obj_path],
+            ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "--extended-lambda", "-c", cu_path, "-o", obj_path],
             capture_output=True,
             text=True,
             timeout=15,
