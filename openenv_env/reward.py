@@ -35,11 +35,15 @@ def compute_reward(
     mem_coalescing: float | None = None,
     warp_efficiency: float | None = None,
 ) -> float:
-    """Return discrete milestone reward {-1, 1, 2, 3}.
+    """Return shaped milestone reward.
 
-    Discrete milestones per CUDA Agent ablation — normalizes reward across
-    problem difficulty so beating torch.compile on sparse graphs earns the
-    same signal as beating it on dense elementwise ops.
+    reward_version `v2-shaped` (EXP-005). Splits the old v1's binary -1
+    bucket into compile-failed (-1) vs compiled-but-wrong (0) so GRPO
+    groups can have non-zero variance even before any rollout is fully
+    correct. EXP-004 v3 (slurm 6876541) showed the 4 WCC tasks split
+    2/4 compile_failed + 2/4 compiled_but_wrong; under v1 both went to
+    -1 and grad_norm=0. Under v2-shaped the same mix gives a mean of
+    -0.5 with std=0.5 per pair, unblocking GRPO.
 
     Args:
         compiled: Whether the kernel compiled successfully.
@@ -47,19 +51,22 @@ def compute_reward(
         speedup_vs_eager: Speedup ratio vs torch.eager baseline.
         speedup_vs_compile: Speedup ratio vs torch.compile baseline.
         occupancy: SM occupancy (unused in discrete mode, kept for API compat).
-        mem_coalescing: Memory coalescing (unused in discrete mode).
-        warp_efficiency: Warp efficiency (unused in discrete mode).
+        mem_coalescing: Memory coalescing (unused).
+        warp_efficiency: Warp efficiency (unused).
 
     Returns:
-        -1.0: compile or correctness failure.
+        -1.0: compile failure (extraction empty OR nvcc error).
+         0.0: compiled_but_wrong — kernel runs, output != reference.
          1.0: correct but not faster than baselines.
          2.0: correct and faster than eager PyTorch (>5%).
          3.0: correct and faster than torch.compile (>5%).
     """
-    # Correctness gate: must pass BEFORE any speedup signal reaches gradients.
-    # A fast-but-wrong kernel MUST get -1.0, not a positive reward.
-    if not compiled or not correct:
+    if not compiled:
         return -1.0
+    if not correct:
+        # v2-shaped: compile-pass alone is a partial signal. Kevin (arXiv
+        # 2507.11948) shows this unlocks small-model GRPO cold-start.
+        return 0.0
 
     # Discrete milestones (highest matching tier wins)
     if speedup_vs_compile > 1.05:
