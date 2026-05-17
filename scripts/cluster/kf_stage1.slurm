@@ -46,6 +46,12 @@ trap on_term SIGTERM SIGINT
 # H200 141GB fits Qwen3-Coder-30B-A3B at bf16 with vLLM/GRPO headroom.
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 
+# EXP-008 fix: explicit re-export so sbatch --export=ALL,VAR=val values
+# actually reach Python's os.getenv. Without this the comma-list values
+# silently dropped (verified twice with ROLLOUT_DEBUG and VERIFIER_DEBUG).
+export KERNELFORGE_ROLLOUT_DEBUG="${KERNELFORGE_ROLLOUT_DEBUG:-0}"
+export KERNELFORGE_VERIFIER_DEBUG="${KERNELFORGE_VERIFIER_DEBUG:-0}"
+
 # EXP-003 D6 (verification): warm-start from doubleGraph Stage 2 ckpt AND
 # filter Stage 1 dataset to wcc-backend tasks only so the SFT contract
 # (void wcc_kernel(...)) matches the eval contract end-to-end.
