@@ -97,7 +97,7 @@ def build_messages(row: dict, target_gpu: str = "A100", target_arch: str = "sm_8
     }
 
 
-def filter_row(row: dict, min_speedup: float, max_diff: float) -> bool:
+def filter_row(row: dict, min_speedup: float, max_diff: float, max_code_chars: int) -> bool:
     if not row.get("Correct"):
         return False
     speedup = row.get("CUDA_Speedup_Native")
@@ -110,6 +110,11 @@ def filter_row(row: dict, min_speedup: float, max_diff: float) -> bool:
     cuda_code = row.get("CUDA_Code") or ""
     if not pytorch_ref.strip() or not cuda_code.strip():
         return False
+    # EXP-007 D4: filter long kernels. Stage 1 max_completion_length=1024
+    # tokens ~= 3.5k chars. Cap at 2500 chars (~700 tokens) so the SFT'd
+    # model can finish a kernel within budget under sampling.
+    if len(cuda_code) > max_code_chars:
+        return False
     # Accept if it has a recognizable entrypoint that our rename will convert.
     if "forward" in cuda_code or "kernel_function" in cuda_code or "run_kernel" in cuda_code:
         return True
@@ -118,14 +123,18 @@ def filter_row(row: dict, min_speedup: float, max_diff: float) -> bool:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-samples", type=int, default=200,
-                        help="Maximum SFT rows to emit (default 200).")
+    parser.add_argument("--max-samples", type=int, default=1500,
+                        help="Maximum SFT rows to emit (default 1500).")
     parser.add_argument("--min-speedup", type=float, default=0.5,
                         help="Minimum CUDA_Speedup_Native to keep a row.")
     parser.add_argument("--max-diff", type=float, default=1e-2,
                         help="Maximum Max_Diff to keep a row (correctness margin).")
+    parser.add_argument("--max-code-chars", type=int, default=2500,
+                        help="Maximum CUDA_Code length in chars (~700 tokens). "
+                             "Prevents SFT'd model from learning to emit kernels longer "
+                             "than max_completion_length=1024 tokens.")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--levels", type=str, default="level_1",
+    parser.add_argument("--levels", type=str, default="level_1,level_2",
                         help="Comma-separated split names (e.g. 'level_1' or 'level_1,level_2').")
     parser.add_argument("--out", type=str, default=str(OUT_PATH))
     args = parser.parse_args()
@@ -140,10 +149,11 @@ def main():
         parts.append(d)
     ds = hf_datasets.concatenate_datasets(parts) if len(parts) > 1 else parts[0]
 
-    print(f"Filtering: Correct=True AND CUDA_Speedup_Native>={args.min_speedup} AND Max_Diff<={args.max_diff}...")
+    print(f"Filtering: Correct=True AND CUDA_Speedup_Native>={args.min_speedup} "
+          f"AND Max_Diff<={args.max_diff} AND len(CUDA_Code)<={args.max_code_chars} chars...")
     kept = []
     for i, row in enumerate(ds):
-        if filter_row(row, args.min_speedup, args.max_diff):
+        if filter_row(row, args.min_speedup, args.max_diff, args.max_code_chars):
             kept.append(row)
     print(f"  {len(kept)} rows kept (out of {len(ds)})")
 
