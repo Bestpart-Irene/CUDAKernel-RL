@@ -47,6 +47,10 @@ MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "100"))
 MAX_COMPLETION_LENGTH = int(os.getenv("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", "1024"))
 # EXP-003: optional warm-start from a Stage 2 SFT adapter checkpoint.
 INIT_CKPT = os.getenv("KERNELFORGE_STAGE1_INIT_CKPT", "") or None
+# EXP-006: env-driven G and beta so we can A/B these without code edits.
+# Defaults match the original config (G=2, TRL default beta=0.04).
+NUM_GENERATIONS = int(os.getenv("KERNELFORGE_STAGE1_NUM_GENERATIONS", "2"))
+BETA = float(os.getenv("KERNELFORGE_STAGE1_BETA", "0.04"))
 
 
 # --- Dataset loading ---
@@ -152,7 +156,8 @@ def main():
     config = GRPOConfig(
         learning_rate=2e-6,
         temperature=1.0,         # High exploration
-        num_generations=2,
+        num_generations=NUM_GENERATIONS,
+        beta=BETA,
         max_completion_length=MAX_COMPLETION_LENGTH,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
