@@ -37,3 +37,32 @@ managed run fails or regresses in a way that is not just noise.
   do not propose Stage 1 GRPO from a raw base checkpoint regardless of
   LR / G / temperature / max_completion_length sweeps — none of those
   knobs fix a zero-signal reward distribution.
+
+## 2026-05-16 — TECH DEBT: ops6k contract worked-example hardcoded in prompt (EXP-003-verify)
+
+- what was tried: EXP-003 verification kept producing `reward=-1` with
+  `reward_std=0` despite SFT from EXP-002 ckpt-50 clearly changing model
+  behavior (entropy 0.15→0.35, EOS rate 0→50%). Single-rollout debug
+  (`scripts/debug_eval_pipeline.py`, slurm 6870504) showed the model
+  produces extractable CUDA that compiles, but writes
+  `void run_kernel(torch::Tensor& output, ...)` (Modal-output-arg style)
+  instead of the ops6k-required `torch::Tensor run_kernel(...)`
+  return-value style. SFT on doubleGraph (WCC-style void signatures)
+  biased the model away from the ops6k contract even though the contract
+  was already in the prompt as a one-line description.
+- why it is technical debt: the F1 fix in
+  `training/task_support.py::task_interface_contract` adds a worked code
+  template inside the ops6k prompt section. This is hardcoded; it teaches
+  the model the signature via prompt rather than via training data, and
+  trains the model to fit the template rather than discover good kernel
+  structure. Any "RL learns kernel structure" claim becomes weaker.
+- evidence: EXP-003 debug log
+  `~/CUDAKernel-RL/logs/kf_debug_eval_6870504.out` on Explorer; commit
+  introducing the hardcode is the same commit as this entry.
+- conditions under which it must be removed: once F3' lands — regenerate
+  `datasets/doublegraph_sft.jsonl` so every assistant message uses the
+  ops6k `torch::Tensor run_kernel(...)` signature, then re-run Stage 2 SFT.
+  After that, remove the worked-example template from
+  `task_interface_contract` and revert to the abstract description. The
+  removal is REQUIRED before any experiment that claims to test "RL
+  learns kernel structure" rather than "RL learns to fill in our template".
