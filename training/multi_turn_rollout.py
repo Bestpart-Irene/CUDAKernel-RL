@@ -286,6 +286,16 @@ def make_multi_turn_rollout(
                         f"correct={result.get('correct')} err='{err_str}'",
                         flush=True,
                     )
+                # EXP-008 D probe: anti-hack / verifier_msg full log per rollout
+                if os.getenv("KERNELFORGE_VERIFIER_DEBUG", "0") == "1":
+                    vmsg = str(result.get("verifier_msg", ""))[:400].replace("\n", " ")
+                    err_full = str(result.get("error", ""))[:400].replace("\n", " ")
+                    print(
+                        f"[VERIFIER prompt={prompt_idx} turn={turn + 1} "
+                        f"compiles={result.get('compiles')} correct={result.get('correct')} "
+                        f"verifier_msg='{vmsg}' error='{err_full}'",
+                        flush=True,
+                    )
 
                 if reward >= 3.0 or turn == max_turns - 1:
                     break
