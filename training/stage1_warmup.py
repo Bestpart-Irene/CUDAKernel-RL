@@ -59,7 +59,14 @@ def _dataset_from_rows(rows: list[dict]) -> Dataset:
 
 
 def load_stage1_dataset() -> Dataset:
-    """Load stage1 prompts from unified dataset loader, with safe fallback."""
+    """Load stage1 prompts from unified dataset loader, with safe fallback.
+
+    EXP-003 D6: If KERNELFORGE_STAGE1_BACKEND_FILTER is set, drop any task
+    whose evaluation_backend does not match. Use "wcc" to align Stage 1
+    GRPO with the doubleGraph SFT contract (verification-phase only).
+    """
+
+    backend_filter = (os.getenv("KERNELFORGE_STAGE1_BACKEND_FILTER") or "").strip()
 
     try:
         max_samples = int(os.getenv("CUDA_AGENT_STAGE1_SAMPLES", "512"))
@@ -69,8 +76,23 @@ def load_stage1_dataset() -> Dataset:
             seed=42,
         )
         if len(ds) > 0:
-            print(f"Loaded {len(ds)} unified Stage 1 prompts")
-            return ds.shuffle(seed=42) if hasattr(ds, "shuffle") else ds
+            if backend_filter:
+                rows = ds.to_list() if hasattr(ds, "to_list") else list(ds)
+                filtered = [r for r in rows if str(r.get("evaluation_backend", "")) == backend_filter]
+                print(
+                    f"Loaded {len(ds)} unified Stage 1 prompts; "
+                    f"after KERNELFORGE_STAGE1_BACKEND_FILTER={backend_filter!r}: {len(filtered)}"
+                )
+                if len(filtered) == 0:
+                    print(
+                        f"WARNING: no Stage 1 prompts matched backend={backend_filter!r}; "
+                        "falling through to fallback WCC dataset."
+                    )
+                else:
+                    return _dataset_from_rows(filtered)
+            else:
+                print(f"Loaded {len(ds)} unified Stage 1 prompts")
+                return ds.shuffle(seed=42) if hasattr(ds, "shuffle") else ds
     except Exception as e:
         print(f"Could not load Ops-6K for Stage 1: {e}")
 

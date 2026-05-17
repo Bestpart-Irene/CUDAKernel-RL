@@ -46,13 +46,18 @@ trap on_term SIGTERM SIGINT
 # H200 141GB fits Qwen3-Coder-30B-A3B at bf16 with vLLM/GRPO headroom.
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 
-# EXP-003: warm-start from Stage 2 SFT adapter checkpoint.
-# Default points at the Sakana-SFT'd ckpt (ops6k Tensor run_kernel contract)
-# for Stage 1 ops6k tasks. To use doubleGraph SFT ckpt (WCC void contract,
-# for future Stage 3 graph tasks), override to
-# KERNELFORGE_STAGE1_INIT_CKPT=outputs/kernelforge-stage2/checkpoint-50.
-# Set to empty string to load base model with no SFT warm-start.
-export KERNELFORGE_STAGE1_INIT_CKPT="${KERNELFORGE_STAGE1_INIT_CKPT:-outputs/kernelforge-stage2-sakana/checkpoint-50}"
+# EXP-003 D6 (verification): warm-start from doubleGraph Stage 2 ckpt AND
+# filter Stage 1 dataset to wcc-backend tasks only so the SFT contract
+# (void wcc_kernel(...)) matches the eval contract end-to-end.
+# Two coupled env vars implement the single logical change "align Stage 1
+# domain with SFT contract":
+#   KERNELFORGE_STAGE1_INIT_CKPT       = doubleGraph SFT ckpt path
+#   KERNELFORGE_STAGE1_BACKEND_FILTER  = wcc (drop ops6k tasks at load)
+# Override to ops6k contract later by switching ckpt to
+# outputs/kernelforge-stage2-sakana/checkpoint-50 and unsetting the filter.
+# Set INIT_CKPT to empty to skip SFT warm-start entirely.
+export KERNELFORGE_STAGE1_INIT_CKPT="${KERNELFORGE_STAGE1_INIT_CKPT:-outputs/kernelforge-stage2/checkpoint-50}"
+export KERNELFORGE_STAGE1_BACKEND_FILTER="${KERNELFORGE_STAGE1_BACKEND_FILTER:-wcc}"
 
 # =============================================================================
 # VERIFICATION PHASE — DIAGNOSTIC ONLY, NOT MASTER-PROMOTION-ELIGIBLE
