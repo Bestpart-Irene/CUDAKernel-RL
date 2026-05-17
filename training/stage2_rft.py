@@ -32,8 +32,15 @@ NUM_TRAJECTORIES = int(os.getenv("KERNELFORGE_RFT_TRAJECTORIES", "50"))
 MIN_REWARD = float(os.getenv("KERNELFORGE_RFT_MIN_REWARD", "1.0"))
 # EXP-002: when set, skip the broken RFT collection path (requires a Stage 1
 # checkpoint that does not exist at cold start) and train SFT directly on
-# the doubleGraph expert demos. Default 0 preserves byte-identical behavior.
+# the primary SFT corpus selected by KERNELFORGE_SFT_DATA_SOURCE.
 SKIP_RFT_COLLECTION = os.getenv("KERNELFORGE_SKIP_RFT_COLLECTION", "0") == "1"
+# Primary SFT corpus selector — added to support EXP-003-verify-v2.
+#   "doublegraph" (default): 192 doubleGraph expert kernels (WCC void contract).
+#                            Use this for Stage 3 graph-kernel warm-starts.
+#   "sakana":                200 Sakana CUDA Engineer rows (Tensor run_kernel
+#                            return contract). Use this for Stage 1 ops6k
+#                            warm-starts.
+SFT_DATA_SOURCE = os.getenv("KERNELFORGE_SFT_DATA_SOURCE", "doublegraph")
 USE_BF16 = sys.platform.startswith("linux")
 
 
@@ -61,6 +68,34 @@ def _load_doublegraph_sft_rows() -> list[dict[str, Any]]:
         if text:
             formatted.append({**row, "text": text})
     return formatted
+
+
+def _load_sakana_sft_rows(path: str = "datasets/sakana_sft.jsonl") -> list[dict[str, Any]]:
+    """Load Sakana-derived SFT rows (ops6k Tensor run_kernel contract)."""
+    import json
+    rows: list[dict[str, Any]] = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            messages = row.get("messages") or []
+            text = row.get("text") or _messages_to_text(messages)
+            if text:
+                rows.append({**row, "text": text})
+    return rows
+
+
+def _load_primary_sft_rows() -> list[dict[str, Any]]:
+    if SFT_DATA_SOURCE == "sakana":
+        return _load_sakana_sft_rows()
+    if SFT_DATA_SOURCE == "doublegraph":
+        return _load_doublegraph_sft_rows()
+    raise ValueError(
+        f"Unknown KERNELFORGE_SFT_DATA_SOURCE={SFT_DATA_SOURCE!r}; "
+        "expected one of {'doublegraph', 'sakana'}."
+    )
 
 
 def main():
@@ -91,11 +126,11 @@ def main():
         rft_dataset = collector.save_rft_dataset(filtered, "datasets/rft_filtered.jsonl")
         rft_rows = rft_dataset.to_list() if hasattr(rft_dataset, "to_list") else list(rft_dataset)
 
-    dg_sft_rows = _load_doublegraph_sft_rows()
-    combined_sft_rows = dg_sft_rows + rft_rows
+    primary_sft_rows = _load_primary_sft_rows()
+    combined_sft_rows = primary_sft_rows + rft_rows
     train_dataset = _dataset_from_rows(combined_sft_rows)
     print(
-        f"Merged Stage 2 SFT corpus: doubleGraph={len(dg_sft_rows)} + "
+        f"Merged Stage 2 SFT corpus: {SFT_DATA_SOURCE}={len(primary_sft_rows)} + "
         f"filtered_trajectories={len(rft_rows)} -> total={len(combined_sft_rows)}"
     )
 

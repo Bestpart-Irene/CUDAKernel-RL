@@ -47,8 +47,12 @@ trap on_term SIGTERM SIGINT
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 
 # EXP-003: warm-start from Stage 2 SFT adapter checkpoint.
-# Set to empty string to load base model instead.
-export KERNELFORGE_STAGE1_INIT_CKPT="${KERNELFORGE_STAGE1_INIT_CKPT:-outputs/kernelforge-stage2/checkpoint-50}"
+# Default points at the Sakana-SFT'd ckpt (ops6k Tensor run_kernel contract)
+# for Stage 1 ops6k tasks. To use doubleGraph SFT ckpt (WCC void contract,
+# for future Stage 3 graph tasks), override to
+# KERNELFORGE_STAGE1_INIT_CKPT=outputs/kernelforge-stage2/checkpoint-50.
+# Set to empty string to load base model with no SFT warm-start.
+export KERNELFORGE_STAGE1_INIT_CKPT="${KERNELFORGE_STAGE1_INIT_CKPT:-outputs/kernelforge-stage2-sakana/checkpoint-50}"
 
 # =============================================================================
 # VERIFICATION PHASE — DIAGNOSTIC ONLY, NOT MASTER-PROMOTION-ELIGIBLE
