@@ -35,13 +35,25 @@ ROLLOUT_LOG_PATH = Path(
 
 
 def extract_cuda_code(text: str) -> str:
-    """Extract CUDA code from model output (fenced block or raw __global__)."""
-    for marker in ["```cuda", "```cpp", "```c", "```c++"]:
-        if marker in text:
-            start = text.index(marker) + len(marker)
-            end = text.find("```", start)
-            if end != -1:
-                return text[start:end].strip()
+    """Extract CUDA code from model output (fenced block or raw __global__).
+
+    Handles the truncated-completion case: when max_new_tokens cuts the
+    generation off before the closing ``` fence, still return the body
+    after the opening fence (without it nvcc sees ```cpp on line 1 and
+    fails with "unrecognized token"). EXP-004 v2 caught this.
+    """
+    # Order matters: longer markers first so ```cpp/```cuda match before ```c.
+    for marker in ["```cuda", "```cpp", "```c++", "```c"]:
+        idx = text.find(marker)
+        if idx == -1:
+            continue
+        start = idx + len(marker)
+        end = text.find("```", start)
+        if end != -1:
+            return text[start:end].strip()
+        # Fence opened but not closed (likely truncated). Drop the opener
+        # but keep whatever body the model emitted.
+        return text[start:].strip()
 
     if re.search(r"__global__\s+void\s+\w+", text) or "PYBIND11_MODULE" in text:
         return text.strip()
