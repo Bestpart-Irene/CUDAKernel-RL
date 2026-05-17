@@ -190,6 +190,51 @@ managed run fails or regresses in a way that is not just noise.
   reward shapes — it is to find why extract/compile/eval rejects 100%
   of well-formed completions.
 
+## 2026-05-17 — TRL 0.29 does NOT support `loss_type="gspo"` (we assumed it did)
+
+- what was tried: dispatch Stage 1 GRPO with
+  `KERNELFORGE_GRPO_LOSS_TYPE=gspo` to test the Qwen team's recommended
+  sequence-level loss for Qwen3 MoE (Qwen GSPO arXiv:2507.18071,
+  researcher contingency #3).
+- why it failed: job 6886192 raised `ValueError: Unknown loss type:
+  gspo` at TRL trainer init. `GRPOConfig.loss_type` parameter exists in
+  TRL 0.29.0 but the *value* "gspo" is not in the allowed enum. TRL 0.29
+  loss_type options are limited to `{grpo, dr_grpo, dapo, bnpo}` —
+  default is `dapo` (we have been on DAPO loss the entire night).
+- evidence: slurm 6886192 stderr — `ValueError: Unknown loss type: gspo`
+  at `trl/trainer/grpo_trainer.py` validation.
+- conceptual family ruled out (until library catches up): **using TRL
+  0.29.x to test GSPO sequence-level loss**. Either bump TRL to a
+  version that ships GSPO, or implement a custom subclass overriding
+  `_compute_loss`. The library check was the correct cheap-kill — we
+  burned 19 H200 minutes before TRL's init validator caught the typo
+  in our hypothesis instead of after a 3h run.
+- conditions under which it could be revisited: install TRL ≥ a release
+  that documents GSPO support, or accept the engineering cost of a
+  custom `TRLOOGRPOTrainer` subclass that implements
+  `_compute_loss` with the GSPO sequence-level form. The Qwen GSPO
+  paper provides the equation; non-trivial but tractable.
+
+## 2026-05-17 — `num_generations=8` requires generation_batch_size divisible by 8
+
+- what was tried: dispatch Stage 1 GRPO with
+  `KERNELFORGE_STAGE1_NUM_GENERATIONS=8` (researcher contingency #1, G≥8
+  per DAPO / Kevin / Dr.GRPO floor) on top of the default
+  `per_device_train_batch_size=1, gradient_accumulation_steps=4` →
+  generation_batch_size = 1 × 4 = 4.
+- why it failed: job 6886282 raised `ValueError: generation_batch_size
+  (4) must be divisible by num_generations (8)` at TRL trainer init,
+  after 1m16s including model load. Failed before any training step.
+- evidence: slurm 6886282 stderr — TRL config validator.
+- conceptual family ruled out: **G=8 without bumping
+  `gradient_accumulation_steps` to ≥8**. Numerical constraint, not a
+  scientific finding.
+- conditions under which it could be revisited: dispatch G=8 with
+  `gradient_accumulation_steps=8` (effective batch 8) — doubles peak
+  memory load from GRPO buffer sizing, OOM risk on H200 80GB with bf16
+  30B-A3B actor at `max_completion_length=2048`. Or step down to G=4
+  (which divides 4 cleanly) — that's the F-retry we dispatch next.
+
 ## 2026-05-17 — `KERNELFORGE_ROLLOUT_DEBUG=1` env var does not propagate through `sbatch --export=ALL,VAR=val`
 
 - what was tried: dispatch Stage 1 GRPO with `sbatch --export=ALL,KERNELFORGE_STAGE1_MAX_STEPS=2,KERNELFORGE_ROLLOUT_DEBUG=1`
