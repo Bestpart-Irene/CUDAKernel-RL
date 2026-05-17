@@ -273,6 +273,16 @@ def make_multi_turn_rollout(
                         "speedup_vs_dg": float(result.get("speedup_vs_dg", 0.0) or 0.0),
                     }
                 )
+                # EXP-007 D1 diagnostic: per-rollout one-liner to stdout
+                if os.getenv("KERNELFORGE_ROLLOUT_DEBUG", "0") == "1":
+                    err_str = str(result.get("error", ""))[:200].replace("\n", " ")
+                    code_len = len(code) if code else 0
+                    print(
+                        f"[ROLLOUT prompt={prompt_idx} turn={turn + 1} reward={reward:+.2f} "
+                        f"code_len={code_len} compiles={result.get('compiles')} "
+                        f"correct={result.get('correct')} err='{err_str}'",
+                        flush=True,
+                    )
 
                 if reward >= 3.0 or turn == max_turns - 1:
                     break
