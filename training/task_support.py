@@ -173,50 +173,13 @@ def task_interface_contract(row: dict[str, Any]) -> str:
             "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
         )
     if backend == "ops6k":
-        # NOTE: TEMPORARY HARDCODED VERIFICATION TEMPLATE (EXP-003-verify).
-        # Adds a worked example to make the run_kernel signature unambiguous
-        # because EXP-003 debug found that SFT on doubleGraph (WCC-style void
-        # signatures) biased the model toward void run_kernel(output, ...)
-        # instead of the ops6k-required Tensor run_kernel(inputs...) -> output.
-        # This worked-example hardcode is a known technical debt; clean it up
-        # in a follow-up that re-SFTs on contract-matching data. See
-        # research/do-not-repeat.md and research/notes.md verification-phase
-        # convention.
         return (
             "Evaluation contract:\n"
             "- Produce a single PyTorch CUDA extension source file.\n"
             "- Include `#include <torch/extension.h>` and a `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)` block.\n"
             '- Export `m.def("run_kernel", &run_kernel)`.\n'
-            "- **CRITICAL**: `run_kernel` MUST be a free function with signature "
-            "`torch::Tensor run_kernel(torch::Tensor input_0, torch::Tensor input_1, ...)` "
-            "that RETURNS the output tensor. It must accept exactly the tensors returned by `get_inputs()` "
-            "and return outputs matching `Model(*inputs)`.\n"
-            "- Do NOT use `void run_kernel(torch::Tensor output, ...)` style. The eval harness calls "
-            "`extension.run_kernel(*inputs)` and expects a returned tensor.\n"
-            "- Worked template (fill in the kernel and adjust input/output types and shapes):\n"
-            "```cpp\n"
-            "#include <torch/extension.h>\n"
-            "#include <cuda_runtime.h>\n"
-            "// CU_FLAGS: -O3\n"
-            "\n"
-            "__global__ void my_op_kernel(/* pointers and sizes */) {\n"
-            "    // kernel body\n"
-            "}\n"
-            "\n"
-            "torch::Tensor run_kernel(torch::Tensor a, torch::Tensor b) {\n"
-            "    auto out = torch::empty_like(a);  // shape may need to be derived from inputs\n"
-            "    int N = a.numel();\n"
-            "    int block = 256;\n"
-            "    int grid = (N + block - 1) / block;\n"
-            "    my_op_kernel<<<grid, block>>>(a.data_ptr<float>(), b.data_ptr<float>(),\n"
-            "                                   out.data_ptr<float>(), N);\n"
-            "    return out;\n"
-            "}\n"
-            "\n"
-            "PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n"
-            "    m.def(\"run_kernel\", &run_kernel);\n"
-            "}\n"
-            "```\n"
+            "- `run_kernel(*inputs)` must accept the tensors returned by `get_inputs()` and return outputs "
+            "matching `Model(*inputs)`.\n"
             "- Return CUDA/C++ code only.\n"
             "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
         )
