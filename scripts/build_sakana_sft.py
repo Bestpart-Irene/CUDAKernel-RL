@@ -47,14 +47,17 @@ def _load_hf_datasets():
         sys.path = orig_sys_path
 
 
-def rename_kernel_function_to_run_kernel(code: str) -> str:
-    """Rewrite `kernel_function` (Sakana's pybind name) → `run_kernel` (ours).
+def rename_sakana_entrypoint_to_run_kernel(code: str) -> str:
+    """Rewrite Sakana's pybind entry point name → `run_kernel`.
 
-    Sakana exports `m.def("kernel_function", &kernel_function)`; eval_core
-    looks for `run_kernel`. Rewrite occurrences of the bare identifier and
-    the pybind string literal but leave anything else (e.g. comments,
-    unrelated identifiers) alone.
+    Verified on level_1: Sakana exports `m.def("forward", &forward, ...)`
+    with a free function `torch::Tensor forward(torch::Tensor A, ...)`.
+    eval_core.py expects `run_kernel`. Rename whole-word occurrences of
+    `forward` (and the older `kernel_function`) to `run_kernel`. Comments
+    referencing other things aren't matched because we anchor on word
+    boundaries and these names are domain-specific.
     """
+    code = re.sub(r"\bforward\b", "run_kernel", code)
     code = re.sub(r"\bkernel_function\b", "run_kernel", code)
     return code
 
@@ -62,7 +65,7 @@ def rename_kernel_function_to_run_kernel(code: str) -> str:
 def build_messages(row: dict, target_gpu: str = "A100", target_arch: str = "sm_80") -> dict:
     """Compose one HF-messages SFT example from a Sakana row."""
     pytorch_ref = str(row.get("PyTorch_Code_Module") or "").strip()
-    cuda_code = rename_kernel_function_to_run_kernel(str(row.get("CUDA_Code") or "").strip())
+    cuda_code = rename_sakana_entrypoint_to_run_kernel(str(row.get("CUDA_Code") or "").strip())
     op_name = str(row.get("Op_Name") or "").strip()
 
     system_msg = (
@@ -107,7 +110,8 @@ def filter_row(row: dict, min_speedup: float, max_diff: float) -> bool:
     cuda_code = row.get("CUDA_Code") or ""
     if not pytorch_ref.strip() or not cuda_code.strip():
         return False
-    if "run_kernel" in cuda_code or "kernel_function" in cuda_code:
+    # Accept if it has a recognizable entrypoint that our rename will convert.
+    if "forward" in cuda_code or "kernel_function" in cuda_code or "run_kernel" in cuda_code:
         return True
     return False
 
