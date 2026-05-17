@@ -1,8 +1,9 @@
 #!/bin/bash
-# Diagnostic: 1-rollout probe of the EXP-003 reward chain.
-# Loads EXP-002 SFT adapter, generates one completion, walks the full
-# extract → compile → eval chain printing what each layer sees.
-# Expected runtime: ~10 min (mostly model load).
+# EXP-004 diagnostic: 1 rollout per WCC-filtered stage1 task (4 tasks total).
+# Loads EXP-002 SFT adapter, generates one completion per task, walks the
+# full extract → compile → eval chain, and dumps per-task JSON into
+# outputs/exp004_debug/ for offline bucket attribution.
+# Expected runtime: ~15-20 min (model load ~5min + 4 rollouts × ~1-2min each).
 
 #SBATCH --job-name=kf_debug_eval
 #SBATCH --partition=gpu
@@ -26,6 +27,11 @@ export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 export KERNELFORGE_SKIP_UNSLOTH=1
 export KERNELFORGE_EVAL_BACKEND=local
 export KERNELFORGE_EVAL_URL="http://disabled:0"
+# EXP-004: align dataset selection with EXP-003 D6 stage1 (WCC-only).
+export KERNELFORGE_STAGE1_BACKEND_FILTER=wcc
+# Persistent JSON dump location (NOT /tmp on the compute node).
+export KERNELFORGE_EXP004_OUTDIR="${REPO_ROOT}/outputs/exp004_debug"
+mkdir -p "${KERNELFORGE_EXP004_OUTDIR}"
 
 if [ ! -d "${KF_VENV}" ]; then
   echo "FATAL: venv not found at ${KF_VENV}." >&2
