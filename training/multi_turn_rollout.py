@@ -421,6 +421,35 @@ def reward_from_env(completions: list[str], **kwargs: Any) -> list[float]:
 
         # Always re-derive via reward.py — never trust a `reward` field a
         # backend may have injected. Mirrors the rollout-loop reward path.
-        rewards.append(float(_compute_reward_from_result(result)))
+        reward = float(_compute_reward_from_result(result))
+        rewards.append(reward)
+
+        # Diagnostic prints live on the *active* code path. TRL 0.29 does not
+        # actually invoke the multi-turn rollout_func (confirmed EXP-009-B
+        # 2026-05-18 log of job 6888764: [ROLLOUT_FACTORY] fired once,
+        # [ROLLOUT_CALL] zero times), so the gated prints inside rollout_func
+        # are dead. Keep them here so KERNELFORGE_ROLLOUT_DEBUG=1 and
+        # KERNELFORGE_VERIFIER_DEBUG=1 actually surface signal.
+        if os.getenv("KERNELFORGE_ROLLOUT_DEBUG", "0") == "1":
+            err_str = str(result.get("error", ""))[:200].replace("\n", " ")
+            code_len = len(code) if code else 0
+            print(
+                f"[ROLLOUT_INLINE i={i} reward={reward:+.2f} "
+                f"code_len={code_len} compiles={result.get('compiles')} "
+                f"correct={result.get('correct')} err='{err_str}']",
+                flush=True,
+            )
+        if os.getenv("KERNELFORGE_VERIFIER_DEBUG", "0") == "1":
+            vmsg = str(result.get("verifier_msg", ""))[:400].replace("\n", " ")
+            err_full = str(result.get("error", ""))[:400].replace("\n", " ")
+            sv_eager = result.get("speedup_vs_orig", 0.0)
+            sv_compile = result.get("speedup_vs_dg", 0.0)
+            print(
+                f"[VERIFIER_INLINE i={i} compiles={result.get('compiles')} "
+                f"correct={result.get('correct')} sv_eager={sv_eager} "
+                f"sv_compile={sv_compile} verifier_msg='{vmsg}' "
+                f"error='{err_full}']",
+                flush=True,
+            )
 
     return rewards
