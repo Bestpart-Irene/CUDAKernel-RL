@@ -189,8 +189,17 @@ def make_multi_turn_rollout(
 
     gpu_name = skill_md_gpu or os.getenv("KERNELFORGE_TARGET_GPU", "a100").lower()
     prompt_lookup = build_prompt_lookup(problem_metadata or [])
+    print(
+        f"[ROLLOUT_FACTORY] make_multi_turn_rollout built rollout_func "
+        f"(max_turns={max_turns}, prompts_known={len(prompt_lookup)})",
+        flush=True,
+    )
 
     def rollout_func(prompts: list[str], trainer: Any) -> dict:
+        print(
+            f"[ROLLOUT_CALL] rollout_func invoked with {len(prompts)} prompts",
+            flush=True,
+        )
         tokenizer = trainer.processing_class
         skill_context = build_skill_md(gpu_name)
         baseline_orig, baseline_dg = _get_baselines()
@@ -331,8 +340,82 @@ def make_multi_turn_rollout(
 
 
 def reward_from_env(completions: list[str], **kwargs: Any) -> list[float]:
-    """Extract the rewards produced by rollout_func."""
+    """Compute reward for each completion via the canonical extract → compile → eval → reward.py chain.
+
+    Two modes:
+    1. **rollout_func path** (multi-turn): if `env_reward` is in kwargs and matches
+       len(completions), pass through — rollout_func already computed it.
+    2. **TRL default-generation path** (single-turn): TRL 0.29 may not invoke
+       our rollout_func in every config. In that case `env_reward` is missing
+       and we MUST do the full reward computation here. **Never return a
+       hardcoded -1.0 fallback** — that was the historical bypass that made
+       every prior v1/v2/G/β A/B test compare two identical constant outputs.
+
+    Inputs from TRL (per the GRPOTrainer reward_funcs contract):
+      completions: list of generated text (post-tokenization decode)
+      kwargs: every dataset column passed by name, e.g. `prompts`, `task_code`,
+              `ops`, `evaluation_backend`, etc. — values are per-row lists
+              aligned with completions.
+    """
     env_rewards = kwargs.get("env_reward", [])
-    if env_rewards:
-        return [float(reward) for reward in env_rewards]
-    return [-1.0] * len(completions)
+    if env_rewards and len(env_rewards) == len(completions):
+        return [float(r) for r in env_rewards]
+
+    # TRL bypassed our rollout_func — compute rewards inline from completions.
+    print(
+        f"[REWARD_FROM_ENV] computing {len(completions)} rewards inline "
+        f"(env_reward len={len(env_rewards)}); kwargs keys={sorted(kwargs.keys())}",
+        flush=True,
+    )
+
+    baseline_orig, baseline_dg = _get_baselines()
+
+    def _row_field(name: str, idx: int) -> Any:
+        v = kwargs.get(name)
+        if isinstance(v, list) and idx < len(v):
+            return v[idx]
+        return None
+
+    rewards: list[float] = []
+    for i, completion in enumerate(completions):
+        task_row = normalize_task_row({
+            "prompt": _row_field("prompts", i) or _row_field("prompt", i),
+            "task_code": _row_field("task_code", i),
+            "ops": _row_field("ops", i),
+            "data_source": _row_field("data_source", i),
+            "evaluation_backend": _row_field("evaluation_backend", i),
+            "difficulty": _row_field("difficulty", i),
+        })
+
+        code = extract_cuda_code(completion)
+        if not code:
+            result = {
+                "compiles": False,
+                "correct": False,
+                "error": "No valid CUDA/C++ code was found.",
+            }
+        else:
+            compiles_locally, compile_err = _local_compile_check(code)
+            if not compiles_locally:
+                result = {"compiles": False, "correct": False, "error": compile_err[:200]}
+            elif not task_row.get("supports_evaluation"):
+                result = {
+                    "compiles": False,
+                    "correct": False,
+                    "error": task_row.get("support_reason", "Unsupported evaluation backend"),
+                }
+            else:
+                try:
+                    result = evaluate_code_remote(
+                        code,
+                        task_row,
+                        baseline_orig_ms=baseline_orig,
+                        baseline_dg_ms=baseline_dg,
+                    )
+                except Exception as exc:
+                    print(f"[REWARD_FROM_ENV] Eval dispatch failed: {exc}", flush=True)
+                    result = {"compiles": False, "correct": False, "error": str(exc)[:200]}
+
+        rewards.append(float(result.get("reward", _compute_reward_from_result(result))))
+
+    return rewards
