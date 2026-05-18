@@ -52,6 +52,37 @@ ROLLOUT_LOG_PATH = Path(
 ).resolve()
 
 
+_WCC_FN_RE = re.compile(
+    r'(?<!extern\s"C"\s)(?<!extern\s"C"\n)(?<!extern\s"C")\s*\bvoid\s+wcc_kernel\s*\('
+)
+
+
+def _ensure_extern_c_wcc(code: str) -> str:
+    """Prepend `extern "C"` to bare `void wcc_kernel(...)` definitions.
+
+    The verifier `dlsym`s `wcc_kernel` by exact name. Without `extern "C"`,
+    a C++ TU mangles the symbol to e.g. `_Z11wcc_kernelPKiS0_iPi` and the
+    dlsym lookup fails with `undefined symbol: wcc_kernel`. Diagnosed
+    2026-05-18 in job 6888876: 4/4 WCC rollouts hit "undefined symbol:
+    wcc_kernel" despite compiling cleanly. The doubleGraph SFT corpus
+    teaches 0/2 examples with `extern "C"`, so the model's prior wins
+    over the in-context prompt instruction. Patch post-extract so the
+    SFT bias is harmless without re-training Stage 2.
+    """
+    if not code or "wcc_kernel" not in code:
+        return code
+    # Find the function definition (not a forward decl) and ensure extern "C"
+    # is in front. Use re.sub with a function so we only rewrite the first
+    # occurrence and only when it's not already wrapped.
+    def _rewrite(m: re.Match) -> str:
+        prefix = code[max(0, m.start() - 32):m.start()]
+        if 'extern "C"' in prefix or "extern\"C\"" in prefix:
+            return m.group(0)
+        return 'extern "C" ' + m.group(0).lstrip()
+
+    return re.sub(r'\bvoid\s+wcc_kernel\s*\(', _rewrite, code, count=1)
+
+
 def extract_cuda_code(text: str) -> str:
     """Extract CUDA code from model output (fenced block or raw __global__).
 
@@ -61,21 +92,23 @@ def extract_cuda_code(text: str) -> str:
     fails with "unrecognized token"). EXP-004 v2 caught this.
     """
     # Order matters: longer markers first so ```cpp/```cuda match before ```c.
+    code: str | None = None
     for marker in ["```cuda", "```cpp", "```c++", "```c"]:
         idx = text.find(marker)
         if idx == -1:
             continue
         start = idx + len(marker)
         end = text.find("```", start)
-        if end != -1:
-            return text[start:end].strip()
-        # Fence opened but not closed (likely truncated). Drop the opener
-        # but keep whatever body the model emitted.
-        return text[start:].strip()
+        code = text[start:end].strip() if end != -1 else text[start:].strip()
+        break
 
-    if re.search(r"__global__\s+void\s+\w+", text) or "PYBIND11_MODULE" in text:
-        return text.strip()
-    return ""
+    if code is None:
+        if re.search(r"__global__\s+void\s+\w+", text) or "PYBIND11_MODULE" in text:
+            code = text.strip()
+        else:
+            return ""
+
+    return _ensure_extern_c_wcc(code)
 
 
 def _append_rollout_log(record: dict[str, Any]) -> None:
