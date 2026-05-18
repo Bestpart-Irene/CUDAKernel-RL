@@ -5,6 +5,18 @@ Durable narrative for KernelForge experiments. Append, do not rewrite.
 `memory-keeper` is the only agent that edits this file. Workers and planners
 hand structured summaries to `memory-keeper` after a managed run completes.
 
+> **2026-05-18 INVALIDATION BANNER** — every numeric result narrated below
+> dated **before 2026-05-18** was produced on a Stage 2 SFT corpus
+> (`datasets/doublegraph_sft.jsonl`) whose 4 WCC entries (indices 76-79)
+> never exposed the verifier's `extern "C" void wcc_kernel(...)` contract.
+> Stage 1/3 runs warm-started from `outputs/kernelforge-stage2/checkpoint-*`
+> inherit that broken prior. Treat the narratives below as **diagnostic
+> history**, not as comparable baselines. See `do-not-repeat.md` entry
+> 2026-05-18 for the full evidence chain. The pivot is
+> `scripts/build_wcc_sft_replacements.py` which regenerates the 4 affected
+> rows; everything after a fresh Stage 2 SFT on the patched corpus is the
+> new comparability anchor.
+
 ## Conventions
 
 ### Cold-start promotion (master = null)

@@ -19,6 +19,46 @@ managed run fails or regresses in a way that is not just noise.
 
 ## Entries
 
+## 2026-05-18 — INVALIDATED PRIOR: every Stage 1/2/3 run before this date ran on a contract-mismatched SFT corpus
+
+- what was discovered: The 4 WCC entries (indices 76-79) in
+  `datasets/doublegraph_sft.jsonl` are upstream doubleGraph production code
+  that lives in `namespace aai`, depends on `cugraph/aai/algorithms.hpp`, and
+  **never exposes `extern "C" void wcc_kernel(...)`** — the exact C symbol
+  the verifier dlsym's at `verification/pac_verify.py:192`. The full corpus
+  contains zero occurrences of the literal string `wcc_kernel`. Stage 2 SFT
+  trained the model on a prior that is fundamentally incompatible with the
+  Stage 1/3 verifier contract.
+- why this invalidates prior records:
+  - All Stage 2 checkpoints produced before this date were SFT'd on the
+    broken corpus. Affected jobs on NU Explorer: 6868418, 6868569, 6871736,
+    6886193, 6887326.
+  - All Stage 1/3 GRPO runs warm-started from those checkpoints
+    (`KERNELFORGE_STAGE1_INIT_CKPT=outputs/kernelforge-stage2/checkpoint-*`)
+    inherit the same prior. This includes every results.tsv row up to and
+    including EXP-009-D (job 6888916, cancelled mid-flight after diagnosis).
+  - EXP-009-B (job 6888764, first non-(-1) signal) still made a real
+    finding — `MAX_COMPLETION_LENGTH=1024` truncates kernels — but its
+    `reward = -0.25` and the 6/7 compile=True / 0/7 correct=True ratio are
+    **NOT comparable** to any future row, because every compile=True
+    rollout failed with `undefined symbol: wcc_kernel`. The compile rate
+    measured the model's prior, not its kernel-writing skill.
+- evidence:
+  - results.tsv rows through 2026-05-18 (no post-fix row exists yet).
+  - kf_stage1_6888876.out: 4/4 `[VERIFIER_INLINE]` lines show
+    `verifier_msg='Kernel FFI verification failed... undefined symbol: wcc_kernel'`.
+  - `grep wcc_kernel datasets/doublegraph_sft.jsonl | wc -l` returns 0.
+- conditions under which prior numbers could be cited again: never. They
+  measured a different system. They stay in the ledger as historical
+  diagnostics, not as performance baselines.
+- conditions for future comparability:
+  - `scripts/build_wcc_sft_replacements.py` (in tree) rewrites the 4 WCC
+    rows with self-contained kernels exposing the canonical contract.
+  - After running it, re-train Stage 2 SFT on the patched corpus. The
+    resulting checkpoint is the new comparability anchor.
+  - All future comparability claims must cite a Stage 2 ckpt produced
+    after this date AND `KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH >= 2048`.
+
 ## 2026-05-16 — Stage 1 GRPO directly on non-SFT'd base Qwen3-Coder-30B-A3B
 
 - what was tried: Cold-start Stage 1 GRPO warm-up (G=2, 100 steps,
