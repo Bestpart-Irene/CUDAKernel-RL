@@ -242,9 +242,49 @@ managed run fails or regresses in a way that is not just noise.
 - why it failed: `MAX_STEPS=2` correctly propagated to the slurm job
   (job ran 2 steps), but no `[ROLLOUT prompt=...]` line appeared in the
   job stdout. The python-side `os.getenv("KERNELFORGE_ROLLOUT_DEBUG", "0")`
-  never saw "1".
-- evidence: EXP-D1 slurm 6885765 stdout (zero `ROLLOUT` matches).
-- conditions under which it could be revisited: prefer adding the env
-  var as an explicit `export` line inside the slurm script body rather
-  than relying on the `--export=ALL,VAR=val` comma-list. Then control
-  it via `KERNELFORGE_ROLLOUT_DEBUG=1 sbatch ...` from the calling shell.
+  never saw "1". The "explicit export inside slurm" fix (commit 2efe179)
+  did NOT resolve this — D-retry (slurm 6886408) with explicit
+  `export KERNELFORGE_VERIFIER_DEBUG="${KERNELFORGE_VERIFIER_DEBUG:-0}"`
+  in the slurm body still saw `os.getenv()` return "0" inside Python.
+- evidence: EXP-D1 slurm 6885765 + EXP-008 D slurm 6886283 + EXP-008
+  D-retry slurm 6886408 all produced zero `[ROLLOUT` or `[VERIFIER`
+  lines in stdout despite different propagation paths.
+- conditions under which it could be revisited: needs root-cause
+  investigation (probably interactive `srun --jobid=<live job>` and
+  `env | grep KERNELFORGE` inside the running job, then trace why
+  bash-level export isn't visible to the spawned python process). DO
+  NOT propose another diagnostic that depends on this env var until
+  the propagation is fixed.
+
+## 2026-05-17 — GRPO param space is NOT the bottleneck for binary -1 collapse
+
+- what was tried tonight (EXP-008 sub-experiments E, F, C, D + retries):
+  systematic single-variable ablations on GRPO config knobs after the
+  infra layer was fixed.
+  - E: max_turns=1 (eliminates multi-turn feedback budget collapse)
+  - F-retry: num_generations=4 (vs default 2)
+  - C-retry: loss_type="grpo" vanilla (vs default "dapo")
+  - All three baseline against shaped reward v2 (compiled_but_wrong=0)
+- why every variation failed: every single one held reward=-1,
+  reward_std=0, grad_norm=0 across all logged steps. E completed all 5
+  steps cleanly with clipped_ratio=0 (perfect EOS rate). F-retry and
+  C-retry crashed at step 4 (OOM-like at max_completion=2048, but the
+  reward distribution leading up to crash was uniformly -1).
+- evidence: EXP-008 E slurm 6886191, F-retry slurm 6886378, C-retry
+  slurm 6886379, plus the 3-way A/B/C from EXP-005/006/007 earlier
+  in the day. Combined ~1500 rollouts. Not one reward != -1.
+- conceptual family ruled out: **single-variable GRPO knob tuning
+  (max_turns, G, loss_type, beta, reward shape v1↔v2) cannot break
+  the binary -1 collapse on this stack**. The bottleneck is downstream
+  of GRPO param choice. Probably one of:
+  - SFT corpus 192 below the published 2K floor (DRTriton arXiv 2603.21465)
+  - anti-hack false negatives (Sakana arXiv 2509.14279 documents 3.13x→1.49x)
+  - WCC task difficulty (4 tasks too hard for this model+SFT scale)
+  - eval correctness tolerance too tight
+- conditions under which it could be revisited: do NOT propose another
+  GRPO-knob-sweep experiment from this corner of the design space.
+  Future revisits must FIRST establish that one of the structural
+  candidates above has been independently moved. For example, GRPO
+  knob sweeps make sense again after SFT corpus is expanded to ≥2K,
+  or after eval tolerance is independently relaxed and reward signal
+  unlocks in any single configuration.

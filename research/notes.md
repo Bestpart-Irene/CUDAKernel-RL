@@ -233,18 +233,139 @@ testing scientific hypotheses about the RL pipeline.
      / compile / eval correctness) — not into max_completion bumps,
      not into reward shape alone.
 
-## 2026-05-17 — EXP-S4 — single-rollout reward-version verification (PENDING)
+## 2026-05-17 — EXP-S4 — single-rollout reward-version verification
 
-- hypothesis: under v2-shaped reward (default), single-rollout
-  compiled_but_wrong bucket returns reward_in_result=0.0 (was -1.0
-  under v1 in slurm 6876541). Confirms or refutes Q1 above.
+- hypothesis: confirm v2-shaped reward reaches the evaluate_code_remote
+  reward path; expected reward_in_result=0.0 for compiled_but_wrong.
 - parent master hash: null
-- variable changed: rerun debug_eval_pipeline.py (no code change vs v3)
-- runner / job id: explorer-h200 / slurm 6885946 (PENDING at notes time)
-- metrics: TBD
-- decision: TBD
-- interpretation: cheap-kill probe. If reward_in_result=0.0 → v2-shaped
-  reaches evaluate_code_remote correctly → the 3-way A/B/C results stand
-  as evidence against reward-shape alone. If reward_in_result=-1.0 →
-  reward.py edit doesn't reach GRPO trainer's reward path → all EXP-005
-  comparisons are invalid (effectively all v1).
+- variable changed: rerun debug_eval_pipeline.py with v2-shaped active
+- runner / job id: explorer-h200 / slurm 6885946 (completed 15:30)
+- metrics: Bucket counts: compile_failed=4, compiled_but_wrong=0,
+  anti_hack=0, eval_crash=0 — different bucket distribution than v3
+  because 4/4 hit REAL compile failures (no rollout reached eval).
+- decision: diagnostic — exposed two genuine compile failures the
+  earlier infra fixes had not caught.
+- interpretation: 4/4 WCC rollouts hit GENUINE nvcc compile errors. Two
+  causes:
+  - 2/4 (tasks 0 & 2): "__host__ or __device__ annotation on lambda
+    requires --extended-lambda nvcc flag". Model writes device lambdas
+    (idiomatic for union-find / path-compression in WCC kernels) but
+    both `_local_compile_check` and `eval_core._nvcc_command` lacked
+    `--extended-lambda`. Fix landed in commit 5c4b63d (added flag to
+    both default command lists).
+  - 2/4 (tasks 1 & 3): "expected a ';'" — truncation at
+    `max_completion_length=1024`. Code body cut mid-statement.
+  Family ruled out: trusting earlier infra-fix coverage was sufficient.
+  Real-output diagnostics (single-rollout) keep finding new
+  infrastructure gaps even after our explicit fix list. Generalization:
+  ship the cheap-kill diagnostic on every cycle, not just the first.
+
+## 2026-05-17 — EXP-008 E — max_turns=1 isolation
+
+- hypothesis: removing multi-turn feedback (max_turns=3 → 1) eliminates
+  the step-2+ context-budget collapse from D1 and unlocks reward signal.
+- parent master hash: null
+- variable changed: KERNELFORGE_STAGE1_MAX_TURNS=1
+- runner / job id: explorer-h200 / slurm 6886191 (completed all 5 steps)
+- metrics: reward=-1 throughout, reward_std=0, grad_norm=0,
+  clipped_ratio=0 by step 5 (100% natural EOS — multi-turn collapse
+  fully eliminated as predicted)
+- decision: no-promote — but the conceptual ruling is rich.
+- interpretation: **Multi-turn feedback collapse is FIXED** by
+  max_turns=1 (clipped_ratio stayed healthy across all 5 steps, no
+  step-2+ degradation pattern from D1 reproduced). **BUT reward stayed
+  -1 throughout 5 steps × G=2 × ~10 rollouts = ~50 rollouts.** Family
+  ruled out: multi-turn feedback is NOT the primary cause of binary
+  reward collapse — it is a secondary symptom. The primary cause is
+  downstream of generation (extract / compile / eval correctness),
+  unaffected by max_turns.
+
+## 2026-05-17 — EXP-008 C / F (FAILED at TRL config validation)
+
+- hypothesis (C): GSPO sequence-level loss unblocks Qwen3 MoE GRPO
+  instability (researcher #3 contingency).
+- hypothesis (F): G=2 below DAPO/Kevin/Dr.GRPO floor; G=8 in isolation.
+- runner / job id: slurm 6886192 (C), 6886282 (F). Both FAILED at
+  TRL init validator before any training.
+- failures:
+  - C: `ValueError: Unknown loss type: gspo`. TRL 0.29.0 loss_type enum
+    is {grpo, dr_grpo, dapo, bnpo}. GSPO not available in this TRL.
+  - F: `ValueError: generation_batch_size (4) must be divisible by
+    num_generations (8)`. With default grad_accum=4, G must divide 4
+    cleanly (1, 2, 4).
+- decision: failed-at-config — but each failure is itself informative.
+  Capture in do-not-repeat so no future planner re-proposes these
+  exact configs. Mitigation cost is small (loss_type retry: vanilla
+  grpo; G retry: G=4 isolation).
+
+## 2026-05-17 — EXP-008 F-retry / C-retry — G=4 / vanilla grpo
+
+- hypothesis (F-retry): G=4 isolation (divides 4 cleanly) on top of
+  the same shaped reward and doubleGraph SFT D6 baseline.
+- hypothesis (C-retry): loss_type="grpo" (vanilla GRPO, NOT the default
+  "dapo" we have been on all night).
+- runner / job id: slurm 6886378 (F-retry), 6886379 (C-retry). Both
+  reached step 4 of 10 then FAILED (exit 1, ~1.5h elapsed each).
+  Probable cause: OOM at step 4 with max_completion=2048 + G=4
+  (F-retry) or vanilla-grpo memory profile (C-retry).
+- metrics (last reported step):
+  - F-retry: step 4 reward=-1 std=0 grad=0 clipped=0.25
+  - C-retry: step 4 reward=-1 std=0 grad=0 clipped=0.25
+- decision: no-promote — both confirm partial picture.
+- interpretation: **None of {G=2, G=4} × {dapo, vanilla grpo} produced
+  any reward != -1**. Researcher contingencies #1 and #2 (G scaling +
+  loss type) both ruled out as primary blockers — the same -1 collapse
+  appears regardless of GRPO knob. Pattern matches EXP-008 E
+  conclusion: the bottleneck is downstream of GRPO param choices.
+
+## 2026-05-17 — EXP-008 D / D-retry — anti-hack verifier_msg diagnostic
+
+- hypothesis: anti-hack runtime checks may be false-rejecting correct
+  kernels (researcher #4 contingency, Sakana arXiv 2509.14279 paper
+  documents 3.13x → 1.49x speedup reduction from over-strict
+  verification).
+- runner / job id: slurm 6886283 (D, scancelled — verifier env did not
+  propagate), slurm 6886408 (D-retry, after slurm explicit `export`
+  fix in commit 2efe179, completed all 3 steps)
+- metrics: D-retry reward=-1 std=0 grad=0 clipped=0.25 across 3 steps;
+  **zero `[VERIFIER prompt=...]` lines in stdout** — env var STILL
+  not visible to Python after slurm explicit export.
+- decision: diagnostic — failed to produce diagnostic data twice. The
+  env propagation bug is now the third confirmed instance (after
+  ROLLOUT_DEBUG and the original VERIFIER_DEBUG) and survives the
+  "explicit export inside slurm body" fix that should have worked.
+- interpretation: the anti-hack hypothesis (researcher #4) **remains
+  untested**. The diagnostic infra is currently broken. Fixing requires
+  ssh-into-running-job inspection or a minimal repro to find why
+  `os.getenv("KERNELFORGE_VERIFIER_DEBUG", "0")` returns "0" even after
+  bash `export KERNELFORGE_VERIFIER_DEBUG=1` happened in the same
+  slurm shell.
+
+## 2026-05-17 — Conceptual summary at end-of-EXP-008
+
+By the end of EXP-008 sub-experiments E/F/C/D and their retries, **the
+GRPO parameter space is empirically ruled out as the bottleneck for the
+binary reward=-1 collapse**:
+
+- multi-turn (max_turns 3 → 1): same reward=-1
+- G size (2 → 4): same reward=-1
+- loss type (dapo default → grpo vanilla): same reward=-1
+- reward shape (v1-binary → v2-shaped, ROLLED INTO every EXP-008 run):
+  same reward=-1
+- infra layer (11 cumulative bugs across the day): all fixed, still -1
+
+Remaining hypotheses to test are all STRUCTURAL, not knob-level:
+
+| candidate | why we did not eliminate tonight |
+|---|---|
+| anti-hack false negatives | diagnostic infra (env var prop) broken |
+| SFT corpus too small (192 vs 2K floor) | structural, multi-day |
+| WCC task pool too hard for this model | needs ops6k domain switch |
+| eval_core correctness tolerance too strict | touches frozen file |
+| LoRA capacity (r=16 on 30B-MoE) | structural |
+
+The path forward is no longer "try another knob". It is one of:
+(a) fix env prop and confirm/refute anti-hack
+(b) switch to ops6k domain (path B, needs Sakana ckpt restart)
+(c) pivot to SkyDiscover evolutionary search (PRD already implements)
+(d) structural scale-up of SFT corpus + maybe base model
