@@ -26,6 +26,14 @@ export KERNELFORGE_EVAL_BACKEND=coreweave
 # (requires non-existent Stage 1 checkpoint) and trains SFT directly on
 # datasets/doublegraph_sft.jsonl. See research/experiments/EXP-002-stage2-sft-first.md.
 export KERNELFORGE_SKIP_RFT_COLLECTION="${KERNELFORGE_SKIP_RFT_COLLECTION:-1}"
+# Explicit re-export so sbatch --export=ALL,VAR=val values reach Python's
+# os.getenv. Every KERNELFORGE_* knob the trainer reads must be listed —
+# missing exports silently fall back to module-level defaults.
+export KERNELFORGE_SFT_DATA_SOURCE="${KERNELFORGE_SFT_DATA_SOURCE:-doublegraph}"
+export KERNELFORGE_STAGE2_EPOCHS="${KERNELFORGE_STAGE2_EPOCHS:-3}"
+export KERNELFORGE_RFT_TRAJECTORIES="${KERNELFORGE_RFT_TRAJECTORIES:-50}"
+export KERNELFORGE_RFT_MIN_REWARD="${KERNELFORGE_RFT_MIN_REWARD:-1.0}"
+export KERNELFORGE_REWARD_VERSION="${KERNELFORGE_REWARD_VERSION:-v2-shaped}"
 
 if [ "${KERNELFORGE_SKIP_RFT_COLLECTION}" = "1" ]; then
   echo "KERNELFORGE_SKIP_RFT_COLLECTION=1 → SFT-only run; skipping eval server wait."

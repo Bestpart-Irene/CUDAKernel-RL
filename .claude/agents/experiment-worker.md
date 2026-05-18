@@ -34,8 +34,13 @@ Execution contract:
 
 - start from refreshed local master (read `research/live/master.json`)
 - make the single change
-- if the spec includes a local smoke step, run it first:
+- **De-risk before the managed run.** Treat the smoke step as a cheap probe
+  of the riskiest assumption, not a formality. If the spec includes a local
+  smoke step, run it first:
   - `python scripts/smoke_test.py` or `python scripts/run_pipeline.py --smoke`
+  If the smoke output contradicts the hypothesis (e.g. reward signal flat,
+  rollout shape wrong, loss NaN), **stop and report back** instead of
+  burning GPU-hours on a doomed managed run.
 - run exactly one managed benchmark:
   - Modal path: `modal run modal_train.py ...` and the eval invocation the
     spec pins
@@ -43,6 +48,10 @@ Execution contract:
     `eval_service/app.py`
 - stream logs to `$KERNELFORGE_LOG_PATH` when set; otherwise to a unique log
   under `research/live/`
+- if mid-run logs make the outcome obviously doomed (compile failures across
+  the batch, reward stuck at floor, loss diverged), stop the job and report
+  back — completing a doomed run wastes GPU-hours that another worker could
+  use for a higher-rate probe
 - parse final metrics (`mean_reward`, `pass_rate`, `speedup_vs_orig`,
   `fast_p`) from the log
 - emit a structured summary the parent can hand to `memory-keeper`
@@ -57,6 +66,12 @@ Final report must include:
 - `mean_reward`, `pass_rate`, `speedup_vs_orig`, `fast_p` (or failure state)
 - promote / no-promote recommendation against current master
 - one-short-paragraph interpretation
+- **on failure or no-promote: a conceptual-level reason, not just "did not
+  beat master".** State which family of approaches this rules out and which
+  it does not. "Tried instantiation X of approach A; failed because of B,
+  so any A-variant that doesn't address B should be skipped" is the
+  expected shape. Without this, the result is one data point on one
+  instantiation, and the planner cannot prune the subtree.
 - note text the parent can hand directly to `memory-keeper`
 
 Do not rely on markdown edits inside your isolated worktree as the durable

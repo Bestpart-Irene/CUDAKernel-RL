@@ -65,7 +65,7 @@ USE_TRLOO = os.getenv("KERNELFORGE_USE_TRLOO", "1") == "1"
 # GRPO config constants — used by both _validate_config() and grpo_kwargs
 PER_DEVICE_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 4
-NUM_GENERATIONS = 2
+NUM_GENERATIONS = int(os.getenv("KERNELFORGE_STAGE3_NUM_GENERATIONS", "2"))
 # Local compile check controlled by KERNELFORGE_LOCAL_COMPILE in multi_turn_rollout.py.
 # Set KERNELFORGE_LOCAL_COMPILE=0 to skip local compile pre-check (slower but simpler).
 

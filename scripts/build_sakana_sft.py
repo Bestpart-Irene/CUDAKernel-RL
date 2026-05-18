@@ -47,19 +47,29 @@ def _load_hf_datasets():
         sys.path = orig_sys_path
 
 
-def rename_sakana_entrypoint_to_run_kernel(code: str) -> str:
-    """Rewrite Sakana's pybind entry point name → `run_kernel`.
+_PYBIND_DEF_RE = re.compile(
+    r'm\.def\s*\(\s*"(?P<name>[A-Za-z_][A-Za-z0-9_]*)"\s*,\s*&(?P=name)\b'
+)
 
-    Verified on level_1: Sakana exports `m.def("forward", &forward, ...)`
-    with a free function `torch::Tensor forward(torch::Tensor A, ...)`.
-    eval_core.py expects `run_kernel`. Rename whole-word occurrences of
-    `forward` (and the older `kernel_function`) to `run_kernel`. Comments
-    referencing other things aren't matched because we anchor on word
-    boundaries and these names are domain-specific.
+
+def rename_sakana_entrypoint_to_run_kernel(code: str) -> str:
+    """Rewrite Sakana's pybind entry point → `run_kernel`.
+
+    Strategy: find the actual entrypoint by parsing the
+    `m.def("NAME", &NAME, ...)` line. Only rename that exact symbol
+    whole-word. Avoids touching unrelated identifiers in comments or
+    helper functions. Always also normalizes the older `kernel_function`
+    name for backwards compatibility with earlier Sakana exports.
     """
-    code = re.sub(r"\bforward\b", "run_kernel", code)
     code = re.sub(r"\bkernel_function\b", "run_kernel", code)
-    return code
+    match = _PYBIND_DEF_RE.search(code)
+    if not match:
+        # No pybind def found — fall back to whole-word forward (legacy).
+        return re.sub(r"\bforward\b", "run_kernel", code)
+    name = match.group("name")
+    if name == "run_kernel":
+        return code
+    return re.sub(rf"\b{re.escape(name)}\b", "run_kernel", code)
 
 
 def build_messages(row: dict, target_gpu: str = "A100", target_arch: str = "sm_80") -> dict:
@@ -97,7 +107,13 @@ def build_messages(row: dict, target_gpu: str = "A100", target_arch: str = "sm_8
     }
 
 
-def filter_row(row: dict, min_speedup: float, max_diff: float, max_code_chars: int) -> bool:
+def filter_row(
+    row: dict,
+    min_speedup: float,
+    max_diff: float,
+    max_code_tokens: int,
+    tokenizer,
+) -> bool:
     if not row.get("Correct"):
         return False
     speedup = row.get("CUDA_Speedup_Native")
@@ -110,12 +126,13 @@ def filter_row(row: dict, min_speedup: float, max_diff: float, max_code_chars: i
     cuda_code = row.get("CUDA_Code") or ""
     if not pytorch_ref.strip() or not cuda_code.strip():
         return False
-    # EXP-007 D4: filter long kernels. Stage 1 max_completion_length=1024
-    # tokens ~= 3.5k chars. Cap at 2500 chars (~700 tokens) so the SFT'd
-    # model can finish a kernel within budget under sampling.
-    if len(cuda_code) > max_code_chars:
+    # Real token-length filter (was char-based, which silently undershoots
+    # for CUDA code where token/char ratio runs higher than the rule-of-
+    # thumb 3.5). Without this, EXP-002b saw assistant messages clipped at
+    # max_completion_length=1024 even after the char-cap.
+    n_tokens = len(tokenizer.encode(cuda_code, add_special_tokens=False))
+    if n_tokens > max_code_tokens:
         return False
-    # Accept if it has a recognizable entrypoint that our rename will convert.
     if "forward" in cuda_code or "kernel_function" in cuda_code or "run_kernel" in cuda_code:
         return True
     return False
@@ -129,15 +146,26 @@ def main():
                         help="Minimum CUDA_Speedup_Native to keep a row.")
     parser.add_argument("--max-diff", type=float, default=1e-2,
                         help="Maximum Max_Diff to keep a row (correctness margin).")
-    parser.add_argument("--max-code-chars", type=int, default=2500,
-                        help="Maximum CUDA_Code length in chars (~700 tokens). "
-                             "Prevents SFT'd model from learning to emit kernels longer "
-                             "than max_completion_length=1024 tokens.")
+    parser.add_argument("--max-code-tokens", type=int, default=900,
+                        help="Maximum CUDA_Code length in tokens (training "
+                             "tokenizer). Stage 1 max_completion_length=1024; "
+                             "leave headroom for the assistant fence + prompt.")
+    parser.add_argument("--tokenizer", type=str,
+                        default="unsloth/Qwen3-Coder-30B-A3B-Instruct",
+                        help="HF model id whose tokenizer is used for the "
+                             "length filter. MUST match the training tokenizer.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--levels", type=str, default="level_1,level_2",
                         help="Comma-separated split names (e.g. 'level_1' or 'level_1,level_2').")
     parser.add_argument("--out", type=str, default=str(OUT_PATH))
+    parser.add_argument("--underfill-warn-ratio", type=float, default=0.5,
+                        help="If final row count < ratio * max_samples, "
+                             "WARN loudly. 0 disables the check.")
     args = parser.parse_args()
+
+    from transformers import AutoTokenizer
+    print(f"Loading tokenizer {args.tokenizer} for length filter...")
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
 
     hf_datasets = _load_hf_datasets()
     print(f"Loading SakanaAI/AI-CUDA-Engineer-Archive splits={args.levels}...")
@@ -150,10 +178,11 @@ def main():
     ds = hf_datasets.concatenate_datasets(parts) if len(parts) > 1 else parts[0]
 
     print(f"Filtering: Correct=True AND CUDA_Speedup_Native>={args.min_speedup} "
-          f"AND Max_Diff<={args.max_diff} AND len(CUDA_Code)<={args.max_code_chars} chars...")
+          f"AND Max_Diff<={args.max_diff} AND tokens(CUDA_Code)<={args.max_code_tokens}...")
     kept = []
     for i, row in enumerate(ds):
-        if filter_row(row, args.min_speedup, args.max_diff, args.max_code_chars):
+        if filter_row(row, args.min_speedup, args.max_diff,
+                      args.max_code_tokens, tokenizer):
             kept.append(row)
     print(f"  {len(kept)} rows kept (out of {len(ds)})")
 
@@ -161,12 +190,41 @@ def main():
         print("FATAL: nothing passed the filter.", file=sys.stderr)
         sys.exit(2)
 
+    # Deduplicate on the renamed CUDA source. Sakana L1 + L2 frequently
+    # contain near-identical kernel variants for the same op; without
+    # this the SFT corpus is biased toward dense ops.
+    seen: set[str] = set()
+    deduped = []
+    for row in kept:
+        renamed = rename_sakana_entrypoint_to_run_kernel(
+            str(row.get("CUDA_Code") or "")
+        )
+        key = renamed.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    n_dropped_dup = len(kept) - len(deduped)
+    if n_dropped_dup:
+        print(f"  deduped: dropped {n_dropped_dup} near-duplicate kernels "
+              f"(kept {len(deduped)})")
+    kept = deduped
+
     # Deterministic shuffle + cap
     import random
     rng = random.Random(args.seed)
     rng.shuffle(kept)
     kept = kept[: args.max_samples]
     print(f"Capped to {len(kept)} rows.")
+
+    if args.underfill_warn_ratio > 0 and len(kept) < args.max_samples * args.underfill_warn_ratio:
+        print(
+            f"WARNING: under-fill — only {len(kept)} rows survived filter+dedup "
+            f"vs --max-samples={args.max_samples}. Loosen filters (lower "
+            f"--min-speedup, raise --max-diff or --max-code-tokens) or accept "
+            f"a smaller corpus.",
+            file=sys.stderr,
+        )
 
     # Write JSONL
     out_path = Path(args.out)

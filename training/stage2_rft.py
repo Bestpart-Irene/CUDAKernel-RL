@@ -26,10 +26,32 @@ from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.model_loader import load_model_and_tokenizer
 from training.rft_filter import TrajectoryCollector
 
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"warning: {name}={raw!r} not int; using default {default}", file=sys.stderr)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"warning: {name}={raw!r} not float; using default {default}", file=sys.stderr)
+        return default
+
+
 STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
-NUM_TRAJECTORIES = int(os.getenv("KERNELFORGE_RFT_TRAJECTORIES", "50"))
-MIN_REWARD = float(os.getenv("KERNELFORGE_RFT_MIN_REWARD", "1.0"))
+NUM_TRAJECTORIES = _env_int("KERNELFORGE_RFT_TRAJECTORIES", 50)
+MIN_REWARD = _env_float("KERNELFORGE_RFT_MIN_REWARD", 1.0)
 # EXP-002: when set, skip the broken RFT collection path (requires a Stage 1
 # checkpoint that does not exist at cold start) and train SFT directly on
 # the primary SFT corpus selected by KERNELFORGE_SFT_DATA_SOURCE.
@@ -42,7 +64,11 @@ SKIP_RFT_COLLECTION = os.getenv("KERNELFORGE_SKIP_RFT_COLLECTION", "0") == "1"
 #                            warm-starts.
 SFT_DATA_SOURCE = os.getenv("KERNELFORGE_SFT_DATA_SOURCE", "doublegraph")
 # EXP-007 D4: cap epochs for large SFT corpora that would exceed 8h walltime.
-STAGE2_EPOCHS = float(os.getenv("KERNELFORGE_STAGE2_EPOCHS", "3"))
+STAGE2_EPOCHS = _env_float("KERNELFORGE_STAGE2_EPOCHS", 3.0)
+# Save frequency — override when corpus is small so a 1-epoch run still
+# produces at least one checkpoint (see memory: NU 8h walltime + HF default
+# save_steps=500 silently drops short runs).
+STAGE2_SAVE_STEPS = _env_int("KERNELFORGE_STAGE2_SAVE_STEPS", 50)
 USE_BF16 = sys.platform.startswith("linux")
 
 
@@ -52,24 +78,13 @@ def _dataset_from_rows(rows: list[dict[str, Any]]) -> Dataset:
     return MiniDataset(rows)
 
 
-def _messages_to_text(messages: list[dict[str, Any]]) -> str:
-    chunks: list[str] = []
-    for message in messages:
-        role = str(message.get("role", "user"))
-        content = str(message.get("content", ""))
-        chunks.append(f"<|{role}|>\n{content}")
-    return "\n".join(chunks)
-
-
 def _load_doublegraph_sft_rows() -> list[dict[str, Any]]:
+    # SFTTrainer detects `messages` via TRL `is_conversational` and applies the
+    # real Qwen chat template via `processing_class.apply_chat_template`. Do NOT
+    # pre-fill a `text` column — that path is for non-conversational data only
+    # and would bypass the template.
     rows = load_training_dataset(stage="stage2")
-    formatted: list[dict[str, Any]] = []
-    for row in rows:
-        messages = row.get("messages") or []
-        text = row.get("text") or _messages_to_text(messages)
-        if text:
-            formatted.append({**row, "text": text})
-    return formatted
+    return [row for row in rows if row.get("messages")]
 
 
 def _load_sakana_sft_rows(path: str = "datasets/sakana_sft.jsonl") -> list[dict[str, Any]]:
@@ -82,10 +97,8 @@ def _load_sakana_sft_rows(path: str = "datasets/sakana_sft.jsonl") -> list[dict[
             if not line:
                 continue
             row = json.loads(line)
-            messages = row.get("messages") or []
-            text = row.get("text") or _messages_to_text(messages)
-            if text:
-                rows.append({**row, "text": text})
+            if row.get("messages"):
+                rows.append(row)
     return rows
 
 
@@ -152,6 +165,13 @@ def main():
     )
     model, tokenizer = load_model_and_tokenizer(checkpoint_path=checkpoint_path)
 
+    # Adaptive save_steps: ensure a small corpus + few epochs still gets at
+    # least 2 checkpoints. (batch=1, grad_accum=4) → effective batch 4 →
+    # steps_per_epoch ≈ len(corpus) / 4.
+    steps_per_epoch = max(1, len(combined_sft_rows) // 4)
+    total_steps = max(1, int(steps_per_epoch * STAGE2_EPOCHS))
+    save_steps = min(STAGE2_SAVE_STEPS, max(1, total_steps // 2))
+
     config = SFTConfig(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=1,
@@ -159,11 +179,15 @@ def main():
         learning_rate=5e-6,
         num_train_epochs=STAGE2_EPOCHS,
         logging_steps=1,
-        save_steps=50,
+        save_steps=save_steps,
         bf16=USE_BF16,
         report_to="wandb",
         max_length=8192,
         eos_token=tokenizer.eos_token,
+    )
+    print(
+        f"Stage 2 SFT: corpus={len(combined_sft_rows)} rows, "
+        f"epochs={STAGE2_EPOCHS}, total_steps={total_steps}, save_steps={save_steps}"
     )
 
     # Dataset has `messages` field; TRL SFTTrainer auto-applies the chat template

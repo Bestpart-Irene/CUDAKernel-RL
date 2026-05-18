@@ -49,8 +49,15 @@ export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 # EXP-008 fix: explicit re-export so sbatch --export=ALL,VAR=val values
 # actually reach Python's os.getenv. Without this the comma-list values
 # silently dropped (verified twice with ROLLOUT_DEBUG and VERIFIER_DEBUG).
+# Add every KERNELFORGE_* knob the trainer reads here — missing exports
+# silently fall back to module-level defaults.
 export KERNELFORGE_ROLLOUT_DEBUG="${KERNELFORGE_ROLLOUT_DEBUG:-0}"
 export KERNELFORGE_VERIFIER_DEBUG="${KERNELFORGE_VERIFIER_DEBUG:-0}"
+export KERNELFORGE_STAGE1_NUM_GENERATIONS="${KERNELFORGE_STAGE1_NUM_GENERATIONS:-2}"
+export KERNELFORGE_STAGE1_BETA="${KERNELFORGE_STAGE1_BETA:-0.04}"
+export KERNELFORGE_STAGE1_MAX_STEPS="${KERNELFORGE_STAGE1_MAX_STEPS:-100}"
+export KERNELFORGE_GRPO_LOSS_TYPE="${KERNELFORGE_GRPO_LOSS_TYPE:-dapo}"
+export KERNELFORGE_REWARD_VERSION="${KERNELFORGE_REWARD_VERSION:-v2-shaped}"
 
 # EXP-003 D6 (verification): warm-start from doubleGraph Stage 2 ckpt AND
 # filter Stage 1 dataset to wcc-backend tasks only so the SFT contract

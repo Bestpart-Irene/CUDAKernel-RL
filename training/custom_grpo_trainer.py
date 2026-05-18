@@ -27,7 +27,12 @@ class TRLOOGRPOTrainer(GRPOTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._trloo_enabled = True
+        # TRLOO N/(N-1) is the *vanilla* GRPO self-inclusion correction. DAPO
+        # (TRL 0.29 default) already applies an unbiased estimator that removes
+        # the same shrinkage; stacking TRLOO on top inflates advantages by an
+        # extra G/(G-1). Only enable when the loss is vanilla "grpo".
+        loss_type = getattr(self.args, "loss_type", "grpo")
+        self._trloo_enabled = loss_type == "grpo"
 
     def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """Compute advantages with TRLOO N/(N-1) correction.
@@ -36,7 +41,8 @@ class TRLOOGRPOTrainer(GRPOTrainer):
             A_i = (r_i - mean(r)) / (std(r) + eps)
 
         This includes sample i in its own baseline, causing (1-1/N) gradient shrinkage.
-        We apply the correction after the base computation.
+        We apply the correction after the base computation, but ONLY for
+        loss_type="grpo" — DAPO is already unbiased.
         """
         # Let parent compute vanilla GRPO advantages
         advantages = super()._compute_advantages(rewards)

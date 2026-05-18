@@ -5,7 +5,8 @@ Multi-turn agentic training via TRL's rollout_func:
   - 3 turns per episode (model sees errors, iterates)
   - Temperature 1.0 for exploration
   - LR 2e-6 to avoid catastrophic forgetting
-  - beta=0.0 (no KL penalty — let model explore freely)
+  - beta=0.04 default (TRL/GRPO standard KL penalty; override to 0.0 via
+    KERNELFORGE_STAGE1_BETA=0.0 for the "let model explore freely" ablation)
   - G=2 generations, 100 max_steps (hackathon config)
   - vLLM disabled by default for hackathon bring-up (`KERNELFORGE_USE_VLLM=0`)
 
@@ -41,16 +42,38 @@ VLLM_GPU_MEMORY_UTILIZATION = float(os.getenv("KERNELFORGE_VLLM_GPU_MEMORY_UTILI
 OPTIMIZER = "paged_adamw_8bit" if IS_LINUX else "adamw_torch"
 USE_BF16 = IS_LINUX
 
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"warning: {name}={raw!r} not int; using default {default}", file=sys.stderr)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"warning: {name}={raw!r} not float; using default {default}", file=sys.stderr)
+        return default
+
+
 # Multi-turn configuration
-MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE1_MAX_TURNS", "3"))
-MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "100"))
-MAX_COMPLETION_LENGTH = int(os.getenv("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", "1024"))
+MAX_TURNS = _env_int("KERNELFORGE_STAGE1_MAX_TURNS", 3)
+MAX_STEPS = _env_int("KERNELFORGE_STAGE1_MAX_STEPS", 100)
+MAX_COMPLETION_LENGTH = _env_int("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", 1024)
 # EXP-003: optional warm-start from a Stage 2 SFT adapter checkpoint.
 INIT_CKPT = os.getenv("KERNELFORGE_STAGE1_INIT_CKPT", "") or None
 # EXP-006: env-driven G and beta so we can A/B these without code edits.
 # Defaults match the original config (G=2, TRL default beta=0.04).
-NUM_GENERATIONS = int(os.getenv("KERNELFORGE_STAGE1_NUM_GENERATIONS", "2"))
-BETA = float(os.getenv("KERNELFORGE_STAGE1_BETA", "0.04"))
+NUM_GENERATIONS = _env_int("KERNELFORGE_STAGE1_NUM_GENERATIONS", 2)
+BETA = _env_float("KERNELFORGE_STAGE1_BETA", 0.04)
 # EXP-008 C: TRL 0.29 loss_type — "dapo" (default), "grpo", "gspo".
 # GSPO addresses Qwen3 MoE token-level GRPO instability (Qwen team's own paper).
 LOSS_TYPE = os.getenv("KERNELFORGE_GRPO_LOSS_TYPE", "dapo")

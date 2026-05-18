@@ -87,12 +87,17 @@ def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
                    occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float
 ```
 
-| Return | Condition |
-|--------|-----------|
-| -1.0 | not compiled OR not execution-correct (compile-only is NOT sufficient) |
-| 1.0 | correct but not faster than baselines |
-| 2.0 | correct and faster than eager PyTorch (>5%) |
-| 3.0 | correct and faster than torch.compile (>5%) |
+Reward shape is selected at module-load time by `KERNELFORGE_REWARD_VERSION`. Default `v2-shaped`. Always record the active version in `research/live/master.json` on every promotion — rows under different versions are **not comparable**.
+
+| Return | v2-shaped (default) | v1-discrete-milestone (legacy switchable) |
+|--------|---------------------|-------------------------------------------|
+| -1.0 | not compiled | not compiled OR compiled-but-wrong |
+| 0.0 | compiled but output incorrect (`compiled_but_wrong`) | (never returned) |
+| 1.0 | correct, not faster than baselines | correct, not faster than baselines |
+| 2.0 | correct, > eager PyTorch (>5%) | correct, > eager PyTorch (>5%) |
+| 3.0 | correct, > torch.compile (>5%) | correct, > torch.compile (>5%) |
+
+v2-shaped was introduced after EXP-004 v3 (slurm 6876541) observed grad_norm=0 under v1 when a GRPO group split 2/4 compile_failed + 2/4 compiled_but_wrong (both collapsed to -1, std=0). v2 separates the two buckets so groups have non-zero variance during cold start. v1 is retained as a switchable fallback.
 
 ```python
 def trloo_post_process(advantages: list[float], n: int) -> list[float]

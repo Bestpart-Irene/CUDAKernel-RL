@@ -23,6 +23,15 @@ TRAIN_GPU = os.getenv("KERNELFORGE_TRAIN_GPU", "H200")
 APP_NAME = os.getenv("KERNELFORGE_TRAIN_APP", "kernelforge-train")
 EVAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 
+# Forward every KERNELFORGE_* knob from the launcher shell into the Modal
+# container. Without this, `modal run` containers start clean and silently
+# fall back to module-level defaults — burning GPU-hours on stale knobs.
+# Image env is content-addressed, so distinct value combos cache distinct
+# image revisions; the install-layer cache is unaffected.
+_KERNELFORGE_ENV_PASSTHROUGH = {
+    k: v for k, v in os.environ.items() if k.startswith("KERNELFORGE_")
+}
+
 train_image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04",
@@ -48,7 +57,7 @@ train_image = (
     # Keep this fail-fast so missing core deps are caught at image build time.
     .run_commands("pip install --no-deps unsloth unsloth_zoo")
     .run_commands("pip install 'https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl' 2>/dev/null || true")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1", **_KERNELFORGE_ENV_PASSTHROUGH})
     .pip_install("hf_transfer")
     .add_local_python_source(
         "training", "openenv_env", "evaluation", "verification",

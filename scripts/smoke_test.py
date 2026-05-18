@@ -19,22 +19,42 @@ def main():
     errors = []
     passed = 0
 
-    # 1. Reward computation (continuous log(speedup) + Nsight bonus)
+    # 1. Reward computation — both v1 and v2 reward shapes (KERNELFORGE_REWARD_VERSION)
     try:
-        import math
-        from openenv_env.reward import compute_reward, trloo_post_process
-        assert compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "compile fail"
-        assert compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "verify fail"
+        import importlib
+        import openenv_env.reward as reward_mod
+
+        def _reload_with_version(version: str):
+            os.environ["KERNELFORGE_REWARD_VERSION"] = version
+            importlib.reload(reward_mod)
+            return reward_mod.compute_reward, reward_mod.trloo_post_process
+
+        # v2-shaped (current default): compiled_but_wrong → 0.0
+        compute_reward, trloo_post_process = _reload_with_version("v2-shaped")
+        assert compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "v2 compile fail"
+        assert compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == 0.0, "v2 verify fail expected 0.0"
         r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.0, speedup_vs_compile=0.9)
-        assert abs(r - 1.0) < 1e-6, f"correct, no speedup: expected 1.0, got {r}"
+        assert abs(r - 1.0) < 1e-6, f"v2 correct, no speedup: expected 1.0, got {r}"
         r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.0)
-        assert abs(r - 2.0) < 1e-6, f"2x speedup_vs_eager: expected 2.0, got {r}"
+        assert abs(r - 2.0) < 1e-6, f"v2 2x speedup_vs_eager: expected 2.0, got {r}"
         r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=2.0)
-        assert abs(r - 3.0) < 1e-6, f"2x speedup_vs_compile: expected 3.0, got {r}"
+        assert abs(r - 3.0) < 1e-6, f"v2 2x speedup_vs_compile: expected 3.0, got {r}"
+
+        # v1-discrete-milestone (legacy, retained as switchable fallback)
+        compute_reward, trloo_post_process = _reload_with_version("v1-discrete-milestone")
+        assert compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "v1 compile fail"
+        assert compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "v1 verify fail expected -1.0"
+        r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.0, speedup_vs_compile=0.9)
+        assert abs(r - 1.0) < 1e-6, f"v1 correct, no speedup: expected 1.0, got {r}"
+
+        # Restore default for downstream tests in this file
+        _reload_with_version("v2-shaped")
+        compute_reward, trloo_post_process = reward_mod.compute_reward, reward_mod.trloo_post_process
+
         # TRLOO post-process: N/(N-1) scaling
         scaled = trloo_post_process([0.5, -0.3, 1.2, -0.8], n=4)
         assert abs(scaled[0] - 0.5 * 4/3) < 1e-6, "TRLOO scaling"
-        print("PASS: reward.compute_reward + trloo_post_process (5 assertions)")
+        print("PASS: reward.compute_reward (v1 + v2) + trloo_post_process (9 assertions)")
         passed += 1
     except Exception as e:
         errors.append(f"FAIL: reward - {e}")

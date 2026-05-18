@@ -268,8 +268,11 @@ def make_multi_turn_rollout(
                         except Exception as exc:
                             print(f"  [Turn {turn + 1}] Eval dispatch failed: {exc}")
                             result = {"compiles": False, "correct": False, "error": str(exc)[:200]}
-                # Canonical reward path — always runs reward.py via task_support.
-                reward = float(result.get("reward", _compute_reward_from_result(result)))
+                # Canonical reward path — always re-derive via reward.py.
+                # Do NOT trust a `reward` field that an eval backend may
+                # have injected: it bypasses KERNELFORGE_REWARD_VERSION and
+                # any future anti-hack adjustments to the reward function.
+                reward = float(_compute_reward_from_result(result))
 
                 if reward > best_reward:
                     best_reward = reward
@@ -416,6 +419,8 @@ def reward_from_env(completions: list[str], **kwargs: Any) -> list[float]:
                     print(f"[REWARD_FROM_ENV] Eval dispatch failed: {exc}", flush=True)
                     result = {"compiles": False, "correct": False, "error": str(exc)[:200]}
 
-        rewards.append(float(result.get("reward", _compute_reward_from_result(result))))
+        # Always re-derive via reward.py — never trust a `reward` field a
+        # backend may have injected. Mirrors the rollout-loop reward path.
+        rewards.append(float(_compute_reward_from_result(result)))
 
     return rewards
