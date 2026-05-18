@@ -13,11 +13,11 @@ from openenv.core.env_server import Environment
 from openenv.core.env_server.types import State
 from openenv_env.models import KernelForgeAction, KernelForgeObservation
 from openenv_env.gpu_registry import get_gpu_spec
-from openenv_env.reward import compute_reward
 from openenv_env.skill_builder import build_skill_md
 from openenv_env.task_pool import TaskPool
 from training.task_support import (
     build_modal_payload,
+    compute_task_reward,
     normalize_eval_result,
     normalize_task_row,
     task_interface_contract,
@@ -157,17 +157,18 @@ class KernelForgeEnv(Environment):
                 "error": str(exc),
             }
 
-        # Compute speedups and reward via canonical function
+        # EXP-FIX: route every branch through compute_task_reward() so
+        # reward.py is always consulted (no more bypass shortcuts).
         if not result.get("compiles"):
-            reward = -1.0
             su_orig = 0
             obs = (f"COMPILATION FAILED (turn {self.turn}/{self.max_turns}):\n"
                    f"{result.get('error', 'Unknown error')[:1500]}")
+            reward = compute_task_reward(result)
         elif not result.get("correct"):
-            reward = -1.0
             su_orig = 0
             obs = (f"VERIFICATION FAILED (turn {self.turn}/{self.max_turns}):\n"
                    f"{result.get('verifier_msg', result.get('error', 'Unknown failure'))}")
+            reward = compute_task_reward(result)
         else:
             rt = float(result["runtime_ms"])
             su_orig = (
@@ -181,12 +182,15 @@ class KernelForgeEnv(Environment):
                 else float(result.get("speedup_vs_dg", 0.0) or 0.0)
             )
 
-            reward = compute_reward(
-                compiled=True,
-                correct=True,
-                speedup_vs_eager=su_orig,
-                speedup_vs_compile=su_dg,
-            )
+            # Use freshly-computed speedups (may differ from result['speedup_*']
+            # if env tracked baselines differently). Build a result-shaped dict.
+            reward = compute_task_reward({
+                **result,
+                "compiles": True,
+                "correct": True,
+                "speedup_vs_orig": su_orig,
+                "speedup_vs_dg": su_dg,
+            })
 
             # Cache baselines from ops6k eval result
             if result.get("baseline_eager_ms") and not self.original_baseline_ms:

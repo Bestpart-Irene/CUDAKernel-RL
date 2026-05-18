@@ -162,33 +162,17 @@ managed run fails or regresses in a way that is not just noise.
   max_completion_length or move to vLLM-backed generation with larger
   KV cache budget.
 
-## 2026-05-17 — Shaped reward + G=2 + beta=0.04 default did NOT recover variance
+## 2026-05-17 — ~~Shaped reward + G=2 + beta=0.04 default did NOT recover variance~~  **WITHDRAWN**
 
-- what was tried: Stage 1 GRPO with reward_version=v2-shaped
-  (compiled_but_wrong → 0.0 instead of -1.0), G=2, beta default 0.04.
-  3-way A/B/C against v1 binary reward and v2-shaped+G=4+beta=0.
-- why it failed: ALL 3 runs (EXP-005 v5, EXP-006/v4, EXP-007/v6) — total
-  ~1200 rollouts over ~24 H200 hours — produced `unique reward values:
-  [-1]`. Not a single rollout returned reward != -1, even in the
-  v2-shaped runs where compiled_but_wrong should yield 0.0.
-- evidence: EXP-005 slurm 6880035, EXP-006 slurm 6880846, EXP-007 slurm
-  6881355.
-- conceptual family **PROVISIONALLY** ruled out: reward-shape-alone
-  fixes for the binary-collapse symptom on this stack. Cannot be a
-  definitive ruling until EXP-S4 (single-rollout v2-shaped verification,
-  slurm 6885946) returns. Two candidate explanations for why v2-shaped
-  showed no effect:
-  - Q1: v2-shaped does not actually reach the GRPO reward path in the
-    multi_turn_rollout chain (module caching / wrong call site).
-  - Q2: the multi_turn_rollout context produces different model outputs
-    than the debug script, and 100% of rollouts genuinely fail
-    extract/compile before reaching eval (EXP-D1 step 1 already showed
-    75% complete rollouts STILL got reward=-1, supporting Q2).
-- conditions under which it could be revisited: only after EXP-S4
-  resolves Q1 vs Q2. If Q1 (chain broken), fix the chain and retry. If
-  Q2 (downstream rejects everything), the right next move is not more
-  reward shapes — it is to find why extract/compile/eval rejects 100%
-  of well-formed completions.
+**Withdrawn 2026-05-17 — this conclusion was based on a bypassed reward
+function.** EXP-005/006/007 produced uniform reward=-1 not because v2-shaped
+failed, but because `training/multi_turn_rollout.py:228/240/243/260` (and
+`openenv_env/kernel_forge_env.py:162/167`) hardcoded `reward = -1.0` in 4+2
+branches without ever calling `compute_reward()`. The v1/v2 A/B was
+effectively `if False: ...` — neither code path actually ran reward.py.
+See "2026-05-17 — 9 hardcoded reward=-1.0 bypasses found and removed" below.
+v1 vs v2-shaped MUST be re-tested with the bypass fix in place; do NOT
+assume v2 is "ruled out".
 
 ## 2026-05-17 — TRL 0.29 does NOT support `loss_type="gspo"` (we assumed it did)
 
@@ -256,35 +240,42 @@ managed run fails or regresses in a way that is not just noise.
   NOT propose another diagnostic that depends on this env var until
   the propagation is fixed.
 
-## 2026-05-17 — GRPO param space is NOT the bottleneck for binary -1 collapse
+## 2026-05-17 — ~~GRPO param space is NOT the bottleneck for binary -1 collapse~~  **WITHDRAWN**
 
-- what was tried tonight (EXP-008 sub-experiments E, F, C, D + retries):
-  systematic single-variable ablations on GRPO config knobs after the
-  infra layer was fixed.
-  - E: max_turns=1 (eliminates multi-turn feedback budget collapse)
-  - F-retry: num_generations=4 (vs default 2)
-  - C-retry: loss_type="grpo" vanilla (vs default "dapo")
-  - All three baseline against shaped reward v2 (compiled_but_wrong=0)
-- why every variation failed: every single one held reward=-1,
-  reward_std=0, grad_norm=0 across all logged steps. E completed all 5
-  steps cleanly with clipped_ratio=0 (perfect EOS rate). F-retry and
-  C-retry crashed at step 4 (OOM-like at max_completion=2048, but the
-  reward distribution leading up to crash was uniformly -1).
-- evidence: EXP-008 E slurm 6886191, F-retry slurm 6886378, C-retry
-  slurm 6886379, plus the 3-way A/B/C from EXP-005/006/007 earlier
-  in the day. Combined ~1500 rollouts. Not one reward != -1.
-- conceptual family ruled out: **single-variable GRPO knob tuning
-  (max_turns, G, loss_type, beta, reward shape v1↔v2) cannot break
-  the binary -1 collapse on this stack**. The bottleneck is downstream
-  of GRPO param choice. Probably one of:
-  - SFT corpus 192 below the published 2K floor (DRTriton arXiv 2603.21465)
-  - anti-hack false negatives (Sakana arXiv 2509.14279 documents 3.13x→1.49x)
-  - WCC task difficulty (4 tasks too hard for this model+SFT scale)
-  - eval correctness tolerance too tight
-- conditions under which it could be revisited: do NOT propose another
-  GRPO-knob-sweep experiment from this corner of the design space.
-  Future revisits must FIRST establish that one of the structural
-  candidates above has been independently moved. For example, GRPO
-  knob sweeps make sense again after SFT corpus is expanded to ≥2K,
-  or after eval tolerance is independently relaxed and reward signal
-  unlocks in any single configuration.
+**Withdrawn 2026-05-17 — the ablations (E max_turns=1, F-retry G=4,
+C-retry loss_type=grpo) all observed `reward=-1, std=0, grad_norm=0` —
+but the rollout code never called `reward.py`, so the experiments tested
+whether different GRPO knobs change the output of `reward = -1.0` (a
+hardcoded constant). Trivially no.** The "single-variable GRPO knob tuning
+cannot break binary -1 collapse" conclusion does not survive removal of
+the bypass. The observation that `clipped_ratio` reached 0 at max_turns=1
+(token-level, independent of reward) is still valid. EVERYTHING about
+reward distribution in EXP-008 must be re-tested after the bypass fix.
+
+## 2026-05-17 — 9 hardcoded reward=-1.0 bypasses found and removed
+
+- what was discovered: 9 sites across 3 files (`training/multi_turn_rollout.py`
+  L228/240/243/260, `openenv_env/kernel_forge_env.py` L162/167,
+  `skydiscover_integration/evaluator.py` L84/89/160) hardcoded
+  `reward = -1.0` (or `combined_score = -1.0`) directly, bypassing
+  `compute_reward()` in `openenv_env/reward.py`. Only the "compile+correct+remote
+  eval succeeded" branch ever called the canonical reward function.
+- why it broke everything: `KERNELFORGE_REWARD_VERSION=v2-shaped` was a
+  no-op for the `compile_failed` and `compiled_but_wrong` buckets — the
+  exact buckets where v2 was supposed to differ from v1. Every prior
+  reward-shape A/B (EXP-005/006/007) effectively compared two identical
+  hardcoded paths. ~1500 rollouts of "v2 didn't help" are uninformative.
+- evidence: pytest 115/115 pass after refactor routes all branches
+  through `training.task_support.compute_task_reward()`; manual
+  fixture replay confirms `KERNELFORGE_REWARD_VERSION` toggle now flips
+  `compiled_but_wrong` between -1.0 (v1) and 0.0 (v2-shaped) as designed.
+- generalizable rule: **before declaring any reward-related conclusion,
+  verify that `compute_reward()` is actually called on the rollout path
+  for every reward bucket.** Unit tests on `reward.py` alone are not
+  sufficient — they exercise a function the rollout may not invoke.
+  Validate via fixture replay through the rollout entry point (see
+  researcher's eval-first methodology, InstructGPT/Constitutional-AI/
+  DeepSeek-R1 standard practice).
+- conditions under which it could be revisited: never. The fix is in
+  place and tested. Future reward changes must include a fixture-replay
+  test through the rollout call graph.

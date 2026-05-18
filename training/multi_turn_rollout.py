@@ -224,8 +224,12 @@ def make_multi_turn_rollout(
                     outputs["completion_ids"], skip_special_tokens=True
                 )
                 code = extract_cuda_code(completion_text)
+                # EXP-FIX: build result dict in every branch then route through
+                # compute_task_reward() ONCE at the end. Prior code hardcoded
+                # reward=-1.0 in 4 branches, bypassing reward.py entirely — that
+                # made KERNELFORGE_REWARD_VERSION a no-op for compile_failed and
+                # broke every prior v1/v2-shaped A/B test.
                 if not code:
-                    reward = -1.0
                     result = {
                         "compiles": False,
                         "correct": False,
@@ -237,10 +241,8 @@ def make_multi_turn_rollout(
                 else:
                     compiles_locally, compile_err = _local_compile_check(code)
                     if not compiles_locally:
-                        reward = -1.0
                         result = {"compiles": False, "correct": False, "error": compile_err[:200]}
                     elif not task_row.get("supports_evaluation"):
-                        reward = -1.0
                         result = {
                             "compiles": False,
                             "correct": False,
@@ -254,11 +256,11 @@ def make_multi_turn_rollout(
                                 baseline_orig_ms=baseline_orig,
                                 baseline_dg_ms=baseline_dg,
                             )
-                            reward = float(result.get("reward", _compute_reward_from_result(result)))
                         except Exception as exc:
                             print(f"  [Turn {turn + 1}] Eval dispatch failed: {exc}")
-                            reward = -1.0
                             result = {"compiles": False, "correct": False, "error": str(exc)[:200]}
+                # Canonical reward path — always runs reward.py via task_support.
+                reward = float(result.get("reward", _compute_reward_from_result(result)))
 
                 if reward > best_reward:
                     best_reward = reward

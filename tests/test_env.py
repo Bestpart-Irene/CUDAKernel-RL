@@ -62,7 +62,8 @@ def test_step_verification_failure(env):
     action = KernelForgeAction(cuda_code="__global__ void k(){}")
     obs = e.step(action)
 
-    assert obs.reward == -1.0
+    # v2-shaped (default): compile_pass + wrong → 0.0 (not -1.0).
+    assert obs.reward == 0.0
     assert "VERIFICATION FAILED" in obs.text
 
 

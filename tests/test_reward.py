@@ -1,15 +1,39 @@
-"""Tests for discrete milestone reward computation {-1, 1, 2, 3}."""
+"""Tests for discrete milestone reward computation.
+
+Default reward shape is v2-shaped: {-1, 0, 1, 2, 3}.
+v1-discrete-milestone (legacy): {-1, -1, 1, 2, 3}.
+Toggle via KERNELFORGE_REWARD_VERSION env var.
+"""
+import importlib
+import os
+
 import pytest
 
+import openenv_env.reward as reward_mod
 from openenv_env.reward import compute_reward, trloo_post_process
+
+
+def _reload_with_version(version: str):
+    os.environ["KERNELFORGE_REWARD_VERSION"] = version
+    importlib.reload(reward_mod)
+    return reward_mod.compute_reward
 
 
 def test_compile_fail():
     assert compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0
 
 
-def test_correct_fail():
-    assert compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0
+def test_v2_shaped_compiled_but_wrong_is_zero():
+    """v2-shaped (default): compile_pass + wrong → 0.0 (NOT -1.0)."""
+    fn = _reload_with_version("v2-shaped")
+    assert fn(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == 0.0
+
+
+def test_v1_compiled_but_wrong_is_negative_one():
+    """v1 legacy: compile_pass + wrong → -1.0 (lumped with compile_failed)."""
+    fn = _reload_with_version("v1-discrete-milestone")
+    assert fn(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0
+    _reload_with_version("v2-shaped")  # restore default for downstream tests
 
 
 def test_correct_no_speedup():

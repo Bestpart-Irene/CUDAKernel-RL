@@ -74,7 +74,8 @@ class TestComputeReward:
         assert _compute_reward_from_result({"compiles": False}) == -1.0
 
     def test_verify_fail(self):
-        assert _compute_reward_from_result({"compiles": True, "correct": False}) == -1.0
+        # v2-shaped (default): compile_pass + wrong → 0.0 (not -1.0).
+        assert _compute_reward_from_result({"compiles": True, "correct": False}) == 0.0
 
     def test_correct_slower(self):
         """speedup_vs_orig=0.9 → correct but <1.05x → discrete reward 1.0"""

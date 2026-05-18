@@ -17,7 +17,8 @@ from typing import Any
 
 from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols
 from openenv_env.eval_backend import dispatch_eval
-from openenv_env.reward import compute_reward, validate_eval_result
+from openenv_env.reward import validate_eval_result
+from training.task_support import compute_task_reward
 
 
 @dataclass
@@ -81,12 +82,16 @@ class KernelForgeEvaluator:
                 )
                 if proc.returncode != 0:
                     result.error = f"Compile failed: {proc.stderr[:500]}"
-                    result.combined_score = -1.0
+                    result.combined_score = compute_task_reward(
+                        {"compiles": False, "correct": False, "error": result.error}
+                    )
                     result.metrics["compiles"] = False
                     return result
             except subprocess.TimeoutExpired:
                 result.error = "Compile timed out (30s)"
-                result.combined_score = -1.0
+                result.combined_score = compute_task_reward(
+                    {"compiles": False, "correct": False, "error": result.error}
+                )
                 result.metrics["compiles"] = False
                 return result
             except FileNotFoundError:
@@ -135,12 +140,12 @@ class KernelForgeEvaluator:
             speedup_key = "speedup_vs_orig"
             speedup = modal_result.get(speedup_key, 0.0)
 
-            reward = compute_reward(
-                compiled=compiled,
-                correct=correct,
-                speedup_vs_eager=speedup,
-                speedup_vs_compile=modal_result.get("speedup_vs_dg", 0.0),
-            )
+            reward = compute_task_reward({
+                "compiles": compiled,
+                "correct": correct,
+                "speedup_vs_orig": speedup,
+                "speedup_vs_dg": modal_result.get("speedup_vs_dg", 0.0),
+            })
 
             result.combined_score = reward
             result.metrics = {
@@ -157,7 +162,9 @@ class KernelForgeEvaluator:
 
         except Exception as e:
             result.error = f"Eval dispatch failed: {str(e)[:500]}"
-            result.combined_score = -1.0
+            result.combined_score = compute_task_reward(
+                {"compiles": False, "correct": False, "error": result.error}
+            )
 
         return result
 
