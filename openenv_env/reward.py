@@ -69,6 +69,13 @@ def compute_reward(
          2.0: correct and faster than eager PyTorch (>5%).
          3.0: correct and faster than torch.compile (>5%).
     """
+    # EXP-009 diagnostic: confirm reward chain is reached and which version is active.
+    print(
+        f"[COMPUTE_REWARD] compiled={compiled} correct={correct} "
+        f"sv_eager={speedup_vs_eager} sv_compile={speedup_vs_compile} "
+        f"version={_REWARD_VERSION}",
+        flush=True,
+    )
     if not compiled:
         return -1.0
     if not correct:
