@@ -3,6 +3,24 @@ Multi-turn rollout for GRPOTrainer.
 
 The policy generates on the training GPU, while correctness and runtime reward
 are computed remotely on the target A100 via CoreWeave/Northflank (or Modal).
+
+DEAD CODE WARNING (verified 2026-05-18 against pinned trl==0.29.0):
+`make_multi_turn_rollout` / `rollout_func` below is NOT invoked by TRL 0.29.
+Job 6888764 log shows `[ROLLOUT_FACTORY]` once and `[ROLLOUT_CALL]` zero
+times. TRL emits a runtime warning at trainer init confirming the
+`rollout_func` parameter is experimental. The active reward path is
+`reward_from_env(...)` below — TRL calls it directly with completions, and
+the `env_reward len=0` branch inline-evaluates each completion via local
+compile + remote/local eval. Implications:
+  - All training is effectively single-turn regardless of
+    `KERNELFORGE_STAGE1_MAX_TURNS` / `KERNELFORGE_STAGE3_MAX_TURNS`.
+  - Multi-turn attribution / feedback / `[ROLLOUT prompt=...]` debug is
+    dead. Diagnostic prints have been relocated to `reward_from_env`
+    inline branch (commit 469f6a4) — use the `[ROLLOUT_INLINE]` and
+    `[VERIFIER_INLINE]` tags.
+  - Re-enabling multi-turn requires either pinning to a TRL version that
+    still calls rollout_func, or driving the turn loop manually inside
+    `reward_from_env`.
 """
 
 from __future__ import annotations

@@ -9,6 +9,25 @@ Improve held-out kernel benchmark score (`mean_reward`, `pass_rate`,
 `speedup_vs_orig`, `fast_p`) with disciplined, comparable single-change
 experiments. Do not claim a win without a recorded managed run.
 
+## TRL 0.29 invariants (verified 2026-05-18)
+
+- `rollout_func` passed via `make_multi_turn_rollout` is **NOT invoked** by TRL
+  0.29 GRPOTrainer. `[ROLLOUT_CALL]` never fires in any current run; TRL emits
+  a runtime warning that the parameter is experimental.
+- All training is effectively **single-turn**, regardless of
+  `KERNELFORGE_STAGE1_MAX_TURNS` / `KERNELFORGE_STAGE3_MAX_TURNS`. Those env
+  vars are currently a no-op.
+- The active reward path is `reward_from_env(...)` in
+  `training/multi_turn_rollout.py`. TRL calls it with completions, and the
+  `env_reward len=0` branch inline-evaluates each via local compile + eval.
+- Diagnostic env vars `KERNELFORGE_ROLLOUT_DEBUG=1` /
+  `KERNELFORGE_VERIFIER_DEBUG=1` print under the `[ROLLOUT_INLINE]` /
+  `[VERIFIER_INLINE]` tags from the inline branch (commit 469f6a4).
+- Do NOT propose experiments that hinge on multi-turn feedback semantics —
+  they will silently regress to single-turn. To re-enable multi-turn, pin to
+  a TRL version that calls rollout_func or drive the turn loop manually
+  inside `reward_from_env`.
+
 ## Hard Rules
 
 - Default editable surface is `training/grpo_train.py` plus the immediate

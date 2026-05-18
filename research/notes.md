@@ -369,3 +369,74 @@ The path forward is no longer "try another knob". It is one of:
 (b) switch to ops6k domain (path B, needs Sakana ckpt restart)
 (c) pivot to SkyDiscover evolutionary search (PRD already implements)
 (d) structural scale-up of SFT corpus + maybe base model
+
+## 2026-05-18 — EXP-009-B — FIRST NON-(-1) SIGNAL: max_completion_length 1024 -> 2048
+
+- hypothesis: bumping `KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH` from 1024
+  to 2048 lets the doubleGraph-SFT'd model finish kernel source before
+  hitting max_new_tokens, unlocking non-(-1) reward on WCC-only Stage 1.
+- parent master hash: 117bb5d
+- variable changed: env :: `KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH` ::
+  1024 -> 2048 (only change vs the EXP-008-E baseline)
+- runner / job id: explorer-h200 / slurm 6888764 (node d4054, gpu-short,
+  walltime 22m13s, 1 step)
+- config: Stage 1 GRPO warmup, 1 step, G=2, beta=0.0, max_turns=1,
+  reward_version=v2-shaped, backend_filter=wcc, eval_backend=local,
+  INIT_CKPT=outputs/kernelforge-stage2/checkpoint-50
+- metrics:
+  - compile rate 0/8 -> 6/7 (~86%)
+  - reward_mean = -0.25 (was -1.0)
+  - reward_std = 0.5 (was 0.0)
+  - grad_norm = 0.046 (was 0.0)
+  - clipped_ratio = 0.50 (was 0.75-1.0)
+  - mean_terminated_length = 1120 (was 638-755)
+  - 0/7 correct=True (every compiled rollout failed correctness)
+- decision: no-promote — first non-(-1) signal in project history but
+  zero correctness; promotion gate requires correct=True.
+- interpretation: **the bottleneck for the entire EXP-001..EXP-008
+  reward=-1 collapse was kernel completions being truncated mid-source,
+  not reward shape, not multi-turn collapse, not GRPO knobs, not
+  anti-hack**. All earlier hypotheses (v2-shaped reward, bypass removal,
+  TRLOO/DAPO loss type, G scaling, max_turns=1) were correct fixes but
+  not the bottleneck. With kernels allowed to finish, 86% compile, and
+  reward variance + non-zero gradient + non-zero advantage now exist for
+  the first time. Next gates: bring at least one rollout to correct=True
+  (then re-open cold-start promotion), and confirm the trend reproduces
+  for >1 step.
+
+## 2026-05-18 — TRL 0.29 `rollout_func` is dead code — multi-turn silently inactive
+
+- finding: TRL 0.29 GRPOTrainer no longer invokes the user-provided
+  `rollout_func` during training. In job 6888764 the construction tag
+  `[ROLLOUT_FACTORY] make_multi_turn_rollout built rollout_func` fired
+  once at init, but the call-site tag `[ROLLOUT_CALL] rollout_func
+  invoked` fired ZERO times across both `.out` and `.err`. TRL emits at
+  trainer init: `'rollout_func' is an experimental feature. This API
+  may change or be removed at any time without prior notice.`
+- effective consequence: every Stage 1 and Stage 3 run in this codebase
+  has been **single-turn** regardless of `KERNELFORGE_STAGE1_MAX_TURNS`.
+  The multi-turn feedback loop in `training/multi_turn_rollout.py:198-330`
+  (the rollout_func body) is dead. `max_turns=3` and `max_turns=1` were
+  empirically indistinguishable for a reason: they pointed at code TRL
+  never called.
+- real reward path: TRL drives generation single-turn, then calls
+  `reward_from_env` (which IS invoked). Inside `reward_from_env`, the
+  `env_reward len=0` branch inline-evaluates each completion via local
+  compile + remote/local eval. This is the production reward path.
+- side effects:
+  - The B5 hypothesis ("multi-turn attribution bug — concat prompt_ids
+    across turns") cannot bite because the multi-turn loop never runs.
+  - The EXP-D1 "multi-turn feedback append at max_turns=3 self-poisons
+    context budget" finding still holds as a *theoretical* concern but
+    was not the active failure mode under TRL 0.29; the apparent step-2
+    clipped_ratio=1.0 in D1 must be re-explained as a TRL-internal
+    rollout artifact, not as our multi-turn feedback collapsing.
+  - Any future probe depending on `[ROLLOUT_*]` debug tags inside
+    `multi_turn_rollout.py` will produce zero output and is unusable as
+    a diagnostic.
+- mitigation already shipped: commit 469f6a4 relocates
+  `KERNELFORGE_ROLLOUT_DEBUG` and `KERNELFORGE_VERIFIER_DEBUG` print
+  gates to the active `reward_from_env` path with new tags
+  `[ROLLOUT_INLINE]` / `[VERIFIER_INLINE]`. Use these going forward.
+- evidence: slurm 6888764 stdout/stderr — single `[ROLLOUT_FACTORY]`
+  line, zero `[ROLLOUT_CALL]` lines.

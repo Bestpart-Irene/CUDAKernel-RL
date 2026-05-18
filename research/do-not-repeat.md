@@ -279,3 +279,59 @@ reward distribution in EXP-008 must be re-tested after the bypass fix.
 - conditions under which it could be revisited: never. The fix is in
   place and tested. Future reward changes must include a fixture-replay
   test through the rollout call graph.
+
+## 2026-05-18 — Stage 1 / Stage 3 with `KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH=1024`
+
+- what was tried: every Stage 1 GRPO run from EXP-001 through EXP-008
+  used `max_completion_length=1024` as the default (or implicit) limit.
+- why it failed: kernels are systematically truncated mid-source. The
+  doubleGraph-SFT'd model emits WCC kernel bodies that need ~1100-1200
+  tokens; ops6k-style kernels run longer still. EXP-009-B isolated the
+  causal variable: flipping 1024 -> 2048 (no other change vs EXP-008-E)
+  produced the **first non-(-1) reward in project history** — compile
+  rate jumped 0/8 -> 6/7 (~86%), reward_std 0 -> 0.5, grad_norm 0 ->
+  0.046. All of EXP-001..EXP-008's reward=-1 collapse retroactively
+  attributes here in large part: well-formed code was being cut before
+  the closing brace and failing compile, not reward shape or GRPO knob.
+- evidence: EXP-009-B (slurm 6888764) at parent master 117bb5d.
+- conceptual family ruled out: **any Stage 1 / Stage 3 GRPO run with
+  `KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH <= 1024`**, regardless of
+  reward version, G, max_turns, or loss_type. The completion budget
+  must be large enough to fit the SFT-distribution-of-lengths tail.
+- conditions under which it could be revisited: only if the SFT corpus
+  is rebuilt with a hard `<=800` token filter on assistant bodies AND
+  the new SFT'd model is verified to EOS naturally under 1024. Until
+  then, default to >=2048.
+
+## 2026-05-18 — Probes that rely on `[ROLLOUT]` debug from `multi_turn_rollout.py`
+
+- what was tried: every prior diagnostic that depended on per-rollout
+  prints inside `training/multi_turn_rollout.py` (the `rollout_func`
+  body): EXP-D1 (slurm 6885765), EXP-008 D (slurm 6886283), EXP-008
+  D-retry (slurm 6886408).
+- why they failed: **TRL 0.29 GRPOTrainer does not invoke `rollout_func`
+  during training.** The construction tag `[ROLLOUT_FACTORY]` fires at
+  init, but `[ROLLOUT_CALL]` never fires — confirmed in EXP-009-B
+  (slurm 6888764) stdout AND stderr. TRL emits warning at init:
+  `'rollout_func' is an experimental feature. This API may change or
+  be removed at any time without prior notice.` The interpretation that
+  env vars "failed to propagate" was partially correct (some did) and
+  partially misdiagnosed: the print sites themselves were in dead code.
+  Every Stage 1 / Stage 3 run in this codebase has actually been
+  **single-turn** regardless of `KERNELFORGE_STAGE1_MAX_TURNS`.
+- evidence: EXP-D1 (6885765), EXP-008-D (6886283), EXP-008-D-retry
+  (6886408), EXP-009-B (6888764) — all show zero `[ROLLOUT_CALL]` or
+  `[ROLLOUT prompt=...]` or `[VERIFIER prompt=...]` lines.
+- conceptual family ruled out: **any probe that gates a diagnostic
+  print on `KERNELFORGE_ROLLOUT_DEBUG` inside `training/multi_turn_rollout.py`,
+  or on `KERNELFORGE_VERIFIER_DEBUG` inside the dead multi-turn path**.
+  These tags will never fire under TRL 0.29.
+- mitigation: commit 469f6a4 relocates the env-gated prints to the
+  active `reward_from_env` path. New tags are `[ROLLOUT_INLINE]` and
+  `[VERIFIER_INLINE]`. Future probes MUST use the `_INLINE` tags.
+- conditions under which it could be revisited: if TRL bumps to a
+  version that re-invokes user-provided `rollout_func`, or if we swap
+  to a custom trainer subclass that explicitly drives multi-turn. Note
+  also: the B5 "multi-turn attribution bug — concat prompt_ids across
+  turns" hypothesis cannot bite under TRL 0.29 because the multi-turn
+  loop never runs; do not re-propose B5 against this trainer.
