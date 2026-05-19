@@ -26,6 +26,15 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/scripts/cluster/cluster_paths.sh"
 mkdir -p "${REPO_ROOT}/logs"
 
+# Redirect ALL stage outputs to scratch by default — /home is quota-limited
+# (40GB on Explorer) and a single Stage 2 checkpoint is ~10GB. Jobs filling
+# /home break slurm's ability to write logs and silently get killed with
+# RaisedSignal:53. Override only if you know what you're doing.
+export KERNELFORGE_STAGE1_OUTPUT="${KERNELFORGE_STAGE1_OUTPUT:-${KF_CHECKPOINTS}/stage1}"
+export KERNELFORGE_STAGE2_OUTPUT="${KERNELFORGE_STAGE2_OUTPUT:-${KF_CHECKPOINTS}/stage2}"
+export KERNELFORGE_STAGE3_OUTPUT="${KERNELFORGE_STAGE3_OUTPUT:-${KF_CHECKPOINTS}/stage3}"
+mkdir -p "${KERNELFORGE_STAGE1_OUTPUT}" "${KERNELFORGE_STAGE2_OUTPUT}" "${KERNELFORGE_STAGE3_OUTPUT}"
+
 # --- Graceful shutdown on slurm SIGTERM (walltime / scancel) ---
 # Slurm sends SIGTERM 60s before SIGKILL. Use that window to copy any
 # in-progress checkpoint to a "interrupted" subdirectory so the next job

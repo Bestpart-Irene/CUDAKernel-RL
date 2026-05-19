@@ -20,6 +20,14 @@ cd "${REPO_ROOT}"
 source "${REPO_ROOT}/scripts/cluster/cluster_paths.sh"
 mkdir -p "${REPO_ROOT}/logs"
 
+# Redirect stage outputs to scratch — /home is quota-limited (40GB on
+# Explorer) and a single SFT checkpoint is ~10GB. Filling /home breaks
+# slurm log writes and silently kills new jobs with RaisedSignal:53.
+export KERNELFORGE_STAGE1_OUTPUT="${KERNELFORGE_STAGE1_OUTPUT:-${KF_CHECKPOINTS}/stage1}"
+export KERNELFORGE_STAGE2_OUTPUT="${KERNELFORGE_STAGE2_OUTPUT:-${KF_CHECKPOINTS}/stage2}"
+export KERNELFORGE_STAGE3_OUTPUT="${KERNELFORGE_STAGE3_OUTPUT:-${KF_CHECKPOINTS}/stage3}"
+mkdir -p "${KERNELFORGE_STAGE1_OUTPUT}" "${KERNELFORGE_STAGE2_OUTPUT}" "${KERNELFORGE_STAGE3_OUTPUT}"
+
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 export KERNELFORGE_EVAL_BACKEND=coreweave
 # EXP-002: SFT-first reorder. Skips broken RFT trajectory collection
