@@ -28,6 +28,34 @@ experiments. Do not claim a win without a recorded managed run.
   a TRL version that calls rollout_func or drive the turn loop manually
   inside `reward_from_env`.
 
+## Resume-and-save discipline (MANDATORY, verified 2026-05-20)
+
+Every `training/stage*.py` MUST satisfy ALL of:
+
+1. `trainer.train()` is called with `resume_from_checkpoint=True` when the
+   `output_dir` already contains a `checkpoint-*` subdir. HF Trainer does
+   NOT auto-resume just because checkpoints exist — verified by job
+   6920681 wasting 1.5h training from base while checkpoint-100 sat
+   unused. Reference implementation: `training/stage2_rft.py` (commit
+   5b59d2e), mirrored to stage1/stage3 in commit bf1b62a.
+
+2. `save_steps` is small enough that a walltime kill loses ≤ ~25% of the
+   run. Default cap: `save_steps <= max_steps // 4`. NU's 8h walltime is
+   a hard ceiling for our account, so any multi-hour stage must
+   checkpoint at least every quarter of its planned duration.
+
+3. `save_steps` is env-overridable (`KERNELFORGE_STAGE{1,2,3}_SAVE_STEPS`)
+   so operators can tighten cadence per run without code edits.
+
+4. `output_dir` points into `/scratch/$KF_NETID/kernelforge/checkpoints/stage*`,
+   never into `/home`. `/home` is quota-limited (~40GB) and a single LoRA
+   checkpoint is ~10GB. The slurm scripts default this via
+   `KERNELFORGE_STAGE*_OUTPUT` (commit 1721927). Verified by job 6906522
+   et al. silently dying with `RaisedSignal:53` after `/home` saturated.
+
+If you add a new stage or modify the trainer init, run through these
+four checks. The reviewer agent rejects diffs that regress any of them.
+
 ## Hard Rules
 
 - Default editable surface is `training/grpo_train.py` plus the immediate
