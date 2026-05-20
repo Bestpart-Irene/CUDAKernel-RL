@@ -204,8 +204,8 @@ def main():
         report_to="none",
         output_dir=OUTPUT_DIR,
         logging_steps=1,
-        save_steps=25,
-        save_total_limit=2,
+        save_steps=int(os.getenv("KERNELFORGE_STAGE3_SAVE_STEPS", "10")),
+        save_total_limit=int(os.getenv("KERNELFORGE_STAGE3_SAVE_TOTAL_LIMIT", "3")),
         top_k=50,
         top_p=0.95,
         repetition_penalty=1.05,
@@ -250,8 +250,22 @@ def main():
         except Exception as e:
             print(f"  Decision gate failed ({e}), proceeding with GRPO...")
 
+    # Auto-resume from latest checkpoint in OUTPUT_DIR (HF Trainer does NOT do
+    # this by default — requires resume_from_checkpoint=True). Mirrors the
+    # stage2_rft.py fix from commit 5b59d2e + stage1_warmup.py fix.
+    resume = False
+    if os.path.isdir(OUTPUT_DIR):
+        ckpts = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
+        if ckpts:
+            resume = True
+            print(
+                f"Stage 3: auto-resuming from latest checkpoint in {OUTPUT_DIR} "
+                f"(found {sorted(ckpts)})"
+            )
+    if not resume:
+        print(f"Stage 3: no existing checkpoint in {OUTPUT_DIR}; starting fresh.")
     print("Starting Stage 3 training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume)
 
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)

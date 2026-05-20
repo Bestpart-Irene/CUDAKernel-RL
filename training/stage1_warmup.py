@@ -179,6 +179,12 @@ def main():
         problem_metadata=task_rows,
     )
 
+    # Save every N steps so walltime kills don't waste everything. Default 5
+    # gives 4 checkpoints across a 20-step run; user can raise SAVE_TOTAL_LIMIT
+    # if they want longer history (each LoRA ckpt ~3.4GB on disk).
+    SAVE_STEPS = _env_int("KERNELFORGE_STAGE1_SAVE_STEPS", 5)
+    SAVE_TOTAL_LIMIT = _env_int("KERNELFORGE_STAGE1_SAVE_TOTAL_LIMIT", 3)
+
     config = GRPOConfig(
         learning_rate=2e-6,
         temperature=1.0,         # High exploration
@@ -195,8 +201,8 @@ def main():
         output_dir=OUTPUT_DIR,
         logging_steps=1,
         save_strategy="steps",
-        save_steps=20,
-        save_total_limit=3,
+        save_steps=SAVE_STEPS,
+        save_total_limit=SAVE_TOTAL_LIMIT,
         top_k=50,
         top_p=0.95,
         repetition_penalty=1.05,
@@ -214,8 +220,22 @@ def main():
         train_dataset=dataset,
     )
 
+    # Auto-resume from latest checkpoint in OUTPUT_DIR (HF Trainer does NOT do
+    # this by default — requires resume_from_checkpoint=True). Mirrors the
+    # stage2_rft.py fix from commit 5b59d2e.
+    resume = False
+    if os.path.isdir(OUTPUT_DIR):
+        ckpts = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
+        if ckpts:
+            resume = True
+            print(
+                f"Stage 1: auto-resuming from latest checkpoint in {OUTPUT_DIR} "
+                f"(found {sorted(ckpts)})"
+            )
+    if not resume:
+        print(f"Stage 1: no existing checkpoint in {OUTPUT_DIR}; starting fresh.")
     print("Starting Stage 1 training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume)
 
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
