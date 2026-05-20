@@ -26,12 +26,17 @@ def validate_eval_result(result: dict) -> dict:
     return out
 
 
-# EXP-005: KERNELFORGE_REWARD_VERSION selects reward shape.
+# EXP-005 / EXP-010: KERNELFORGE_REWARD_VERSION selects reward shape.
 #   v1-discrete-milestone: legacy binary — compiled_but_wrong → -1.0 (same as compile fail).
-#   v2-shaped (default):    compiled_but_wrong → 0.0 so GRPO groups can have non-zero variance.
-# Default kept at v2-shaped because v1 is empirically a dead-end on this stack.
+#   v2-shaped:              compiled_but_wrong → 0.0 so GRPO groups can have non-zero variance.
+#   v3-symbol-shaped (default, EXP-010): splits v2's compile-OK / wrong bucket into
+#       symbol-missing (-0.5) vs symbol-OK-but-numerically-wrong (0.0). Gives GRPO a
+#       directional gradient toward emitting the canonical contract symbol.
+# Default kept at v3-symbol-shaped because v2 was empirically unable to push the
+# model toward `extern "C" void wcc_kernel(...)` (job 6920683, 11 GRPO steps,
+# 100% of compile=True rollouts hit dlsym fail with no gradient toward fixing it).
 import os as _os
-_REWARD_VERSION = _os.getenv("KERNELFORGE_REWARD_VERSION", "v2-shaped").strip()
+_REWARD_VERSION = _os.getenv("KERNELFORGE_REWARD_VERSION", "v3-symbol-shaped").strip()
 
 
 def compute_reward(
@@ -42,16 +47,9 @@ def compute_reward(
     occupancy: float | None = None,
     mem_coalescing: float | None = None,
     warp_efficiency: float | None = None,
+    symbol_loaded: bool = True,
 ) -> float:
     """Return shaped milestone reward.
-
-    reward_version `v2-shaped` (EXP-005). Splits the old v1's binary -1
-    bucket into compile-failed (-1) vs compiled-but-wrong (0) so GRPO
-    groups can have non-zero variance even before any rollout is fully
-    correct. EXP-004 v3 (slurm 6876541) showed the 4 WCC tasks split
-    2/4 compile_failed + 2/4 compiled_but_wrong; under v1 both went to
-    -1 and grad_norm=0. Under v2-shaped the same mix gives a mean of
-    -0.5 with std=0.5 per pair, unblocking GRPO.
 
     Args:
         compiled: Whether the kernel compiled successfully.
@@ -61,17 +59,28 @@ def compute_reward(
         occupancy: SM occupancy (unused in discrete mode, kept for API compat).
         mem_coalescing: Memory coalescing (unused).
         warp_efficiency: Warp efficiency (unused).
+        symbol_loaded: True if the verifier successfully dlsym'd the canonical
+            entry point. v3-symbol-shaped uses this; v1 and v2 ignore it.
 
-    Returns:
-        -1.0: compile failure (extraction empty OR nvcc error).
-         0.0: compiled_but_wrong — kernel runs, output != reference.
-         1.0: correct but not faster than baselines.
-         2.0: correct and faster than eager PyTorch (>5%).
-         3.0: correct and faster than torch.compile (>5%).
+    Reward versions:
+      v1-discrete-milestone:
+        -1.0  if not compiled OR (compiled, correct=False)
+         1/2/3 on the speedup ladder.
+      v2-shaped (EXP-005):
+        -1.0  if not compiled
+         0.0  if compiled but correct=False (any reason)
+         1/2/3 on the speedup ladder.
+      v3-symbol-shaped (EXP-010, default):
+        -1.0  if not compiled
+        -0.5  if compiled, correct=False, AND verifier could NOT dlsym
+              the canonical entry symbol (`undefined symbol: ...`)
+         0.0  if compiled, correct=False, but symbol DID load (numerically wrong)
+         1/2/3 on the speedup ladder.
     """
     # EXP-009 diagnostic: confirm reward chain is reached and which version is active.
     print(
         f"[COMPUTE_REWARD] compiled={compiled} correct={correct} "
+        f"symbol_loaded={symbol_loaded} "
         f"sv_eager={speedup_vs_eager} sv_compile={speedup_vs_compile} "
         f"version={_REWARD_VERSION}",
         flush=True,
@@ -82,7 +91,16 @@ def compute_reward(
         if _REWARD_VERSION == "v1-discrete-milestone":
             # Legacy binary: lumps compiled_but_wrong with compile_failed.
             return -1.0
-        # v2-shaped (default): compile-pass alone is a partial signal.
+        if _REWARD_VERSION == "v3-symbol-shaped" and not symbol_loaded:
+            # EXP-010: model compiled something but the canonical contract
+            # symbol is missing (e.g. forgot `extern "C"` on wcc_kernel).
+            # Worse than "numerically wrong" because there's literally no
+            # callable kernel; better than compile-fail because syntax/types
+            # are sound. The intermediate bucket gives GRPO gradient toward
+            # fixing the contract.
+            return -0.5
+        # v2-shaped (and v3 when symbol DID load): compile-pass + symbol
+        # is a partial signal, only the numerics are wrong.
         # Kevin (arXiv 2507.11948) shows this unlocks small-model GRPO
         # cold-start; EXP-004 v3 confirmed on this stack.
         return 0.0

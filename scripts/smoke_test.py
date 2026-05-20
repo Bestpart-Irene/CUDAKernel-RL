@@ -47,14 +47,29 @@ def main():
         r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.0, speedup_vs_compile=0.9)
         assert abs(r - 1.0) < 1e-6, f"v1 correct, no speedup: expected 1.0, got {r}"
 
+        # v3-symbol-shaped (EXP-010): 4 integrity probes per kernelforge-reward-design skill.
+        compute_reward, trloo_post_process = _reload_with_version("v3-symbol-shaped")
+        # Probe 1: known-good kernel must still hit the top tier
+        r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=2.0)
+        assert abs(r - 3.0) < 1e-6, f"v3 known-good must be 3.0, got {r}"
+        # Probe 2: known-broken (compile fail) must still be -1
+        r = compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0)
+        assert r == -1.0, f"v3 compile-fail must be -1.0, got {r}"
+        # Probe 3: symbol-missing canary must be -0.5 (NEW bucket)
+        r = compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0, symbol_loaded=False)
+        assert r == -0.5, f"v3 symbol-missing must be -0.5, got {r}"
+        # Probe 4: no-regression — compiled + symbol OK + numerically wrong → 0.0 (matches v2)
+        r = compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0, symbol_loaded=True)
+        assert r == 0.0, f"v3 symbol-OK-but-wrong must be 0.0, got {r}"
+
         # Restore default for downstream tests in this file
-        _reload_with_version("v2-shaped")
+        _reload_with_version("v3-symbol-shaped")
         compute_reward, trloo_post_process = reward_mod.compute_reward, reward_mod.trloo_post_process
 
         # TRLOO post-process: N/(N-1) scaling
         scaled = trloo_post_process([0.5, -0.3, 1.2, -0.8], n=4)
         assert abs(scaled[0] - 0.5 * 4/3) < 1e-6, "TRLOO scaling"
-        print("PASS: reward.compute_reward (v1 + v2) + trloo_post_process (9 assertions)")
+        print("PASS: reward.compute_reward (v1 + v2 + v3) + trloo_post_process (13 assertions)")
         passed += 1
     except Exception as e:
         errors.append(f"FAIL: reward - {e}")

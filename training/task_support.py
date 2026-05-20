@@ -258,6 +258,23 @@ def normalize_eval_result(result: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def _detect_symbol_loaded(result: dict[str, Any]) -> bool:
+    """Return False iff the verifier failed to dlsym the canonical entry symbol.
+
+    The eval service does not expose a dedicated "symbol_missing" flag, so we
+    substring-match the verifier message. Pattern is stable across the WCC
+    verifier (`verification/pac_verify.py:198`): `"FFI verification failed"`
+    AND `"undefined symbol"`. EXP-010 — gives v3-symbol-shaped reward a
+    directional signal toward emitting `extern "C" void wcc_kernel(...)`.
+    """
+    if not result.get("compiles"):
+        return True  # n/a when compile failed; v3 short-circuits on compiled first
+    msg = str(result.get("verifier_msg", "") or "")
+    if not msg:
+        return True
+    return not ("undefined symbol" in msg and "FFI verification failed" in msg)
+
+
 def compute_task_reward(result: dict[str, Any] | None) -> float:
     """Compute the canonical reward from a normalized evaluator result."""
     from openenv_env.reward import compute_reward
@@ -271,6 +288,7 @@ def compute_task_reward(result: dict[str, Any] | None) -> float:
         occupancy=normalized.get("occupancy"),
         mem_coalescing=normalized.get("mem_coalescing"),
         warp_efficiency=normalized.get("warp_efficiency"),
+        symbol_loaded=_detect_symbol_loaded(normalized),
     )
 
 

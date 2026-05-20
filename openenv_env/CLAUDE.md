@@ -87,17 +87,23 @@ def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
                    occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float
 ```
 
-Reward shape is selected at module-load time by `KERNELFORGE_REWARD_VERSION`. Default `v2-shaped`. Always record the active version in `research/live/master.json` on every promotion — rows under different versions are **not comparable**.
+Reward shape is selected at module-load time by `KERNELFORGE_REWARD_VERSION`. Default `v3-symbol-shaped` (EXP-010). Always record the active version in `research/live/master.json` on every promotion — rows under different versions are **not comparable**.
 
-| Return | v2-shaped (default) | v1-discrete-milestone (legacy switchable) |
-|--------|---------------------|-------------------------------------------|
-| -1.0 | not compiled | not compiled OR compiled-but-wrong |
-| 0.0 | compiled but output incorrect (`compiled_but_wrong`) | (never returned) |
-| 1.0 | correct, not faster than baselines | correct, not faster than baselines |
-| 2.0 | correct, > eager PyTorch (>5%) | correct, > eager PyTorch (>5%) |
-| 3.0 | correct, > torch.compile (>5%) | correct, > torch.compile (>5%) |
+| Return | v3-symbol-shaped (default, EXP-010) | v2-shaped (EXP-005) | v1-discrete-milestone (legacy) |
+|--------|-------------------------------------|---------------------|--------------------------------|
+| -1.0 | not compiled | not compiled | not compiled OR compiled-but-wrong |
+| -0.5 | compiled, **symbol missing** (`undefined symbol` from verifier dlsym) | (n/a) | (n/a) |
+| 0.0 | compiled, symbol OK, numerically wrong | compiled but wrong (any reason) | (never returned) |
+| 1.0 | correct, not faster than baselines | correct, not faster | correct, not faster |
+| 2.0 | correct, > eager PyTorch (>5%) | correct, > eager | correct, > eager |
+| 3.0 | correct, > torch.compile (>5%) | correct, > torch.compile | correct, > torch.compile |
 
-v2-shaped was introduced after EXP-004 v3 (slurm 6876541) observed grad_norm=0 under v1 when a GRPO group split 2/4 compile_failed + 2/4 compiled_but_wrong (both collapsed to -1, std=0). v2 separates the two buckets so groups have non-zero variance during cold start. v1 is retained as a switchable fallback.
+**Version history**:
+- v1-discrete-milestone (initial): binary success / fail. Caused grad_norm=0 collapses on compile-fail-dominated groups (EXP-004 v3).
+- v2-shaped (EXP-005): split compile-fail from compiled-but-wrong so GRPO has variance. Confirmed unlocks signal but cannot push the model toward the verifier contract — both "symbol missing" and "numerically wrong" gave the same 0.0 (job 6920683, 11 GRPO steps, 100% of compile=True hit `undefined symbol: wcc_kernel`).
+- v3-symbol-shaped (EXP-010, current default): adds a -0.5 bucket between -1 and 0 specifically for "compiled cleanly but verifier could not dlsym the canonical entry". Gives GRPO a directional gradient toward `extern "C" void wcc_kernel(...)` without any prompt edits or post-extract bypass.
+
+`symbol_loaded` is detected in `training/task_support._detect_symbol_loaded` by substring-matching the eval result's `verifier_msg` for `"undefined symbol"` AND `"FFI verification failed"`. v1 / v2 ignore this argument.
 
 ```python
 def trloo_post_process(advantages: list[float], n: int) -> list[float]

@@ -199,8 +199,23 @@ def main():
         train_dataset=train_dataset,
     )
 
+    # Auto-resume from the latest checkpoint in OUTPUT_DIR if one exists.
+    # HF Trainer does NOT auto-resume just because checkpoints are present —
+    # it requires resume_from_checkpoint=True (job 6920681 lesson, 2026-05-19:
+    # we expected resume but got "loading base model" instead, wasting 1.5h).
+    resume = False
+    if os.path.isdir(OUTPUT_DIR):
+        ckpts = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
+        if ckpts:
+            resume = True
+            print(
+                f"Stage 2 SFT: auto-resuming from latest checkpoint in {OUTPUT_DIR} "
+                f"(found {sorted(ckpts)})"
+            )
+    if not resume:
+        print(f"Stage 2 SFT: no existing checkpoint in {OUTPUT_DIR}; starting fresh.")
     print("Starting Stage 2 SFT training on filtered trajectories...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume)
 
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
