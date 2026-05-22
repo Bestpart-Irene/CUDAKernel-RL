@@ -469,5 +469,20 @@ def reward_from_env(completions: list[str], **kwargs: Any) -> list[float]:
                 f"error='{err_full}']",
                 flush=True,
             )
+        if os.getenv("KERNELFORGE_VERIFIER_DEBUG", "0") == "1":
+            import re as _re
+            has_extern_c        = bool(_re.search(r'extern\s*"C"', code))
+            has_wcc_kernel_decl = bool(_re.search(r'\bwcc_kernel\s*\(', code))
+            has_global_wcc      = bool(_re.search(r'__global__\s+void\s+wcc_kernel', code))
+            in_namespace        = bool(_re.search(r'namespace\s+\w+\s*\{', code))
+            is_static_or_inline = bool(_re.search(r'\b(static|inline)\s+void\s+wcc_kernel', code))
+            code_tail_truncated = bool(code) and not code.rstrip().endswith("}")
+            print(
+                f"[SYMPROBE_INLINE i={i} compiles={result.get('compiles')} "
+                f"has_extern_c={has_extern_c} has_wcc_kernel_decl={has_wcc_kernel_decl} "
+                f"has_global_wcc={has_global_wcc} in_namespace={in_namespace} "
+                f"is_static_or_inline={is_static_or_inline} code_tail_truncated={code_tail_truncated}]",
+                flush=True,
+            )
 
     return rewards
