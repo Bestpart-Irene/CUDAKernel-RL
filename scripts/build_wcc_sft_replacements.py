@@ -40,11 +40,85 @@ Run: `python scripts/build_wcc_sft_replacements.py`
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SFT_PATH = ROOT / "datasets" / "doublegraph_sft.jsonl"
 WCC_INDICES_REPLACE = [76, 77, 78, 79]  # production kernel goes here
+
+
+# EXP-013-B (2026-05-23): ABI-axis annotations.
+#
+# SYMPROBE diagnostic on EXP-012-A' rollouts:
+#   - 80 SYMPROBE rollouts, 37 with compiles=True
+#   - 26/37 (70%) had NO `extern "C"` -> C++ name mangling kills the symbol
+#   - 14/37 (38%) wrote `__global__ void wcc_kernel(...)` -- a CUDA device
+#     kernel masquerading as the entry symbol, NOT a host wrapper
+#   -  4/37 (11%) had BOTH `__global__ wcc_kernel` AND `extern "C"` but
+#     placement was wrong
+#
+# Conclusion: model conflates "the WCC kernel" (the device function) with
+# "the wcc_kernel entry symbol" (the host wrapper). Diversity along the
+# wrong axis. Inject explicit role-labelling comments at every device
+# kernel + before the host wrapper so the two-layer concept is reinforced
+# 8 x ~20 occurrences across the SFT corpus.
+
+DEVICE_KERNEL_ANNOTATION = (
+    "// DEVICE KERNEL -- runs on GPU, launched from host via <<<grid, block>>>.\n"
+    "// NOT the entry symbol the verifier dlsym's. The 'extern \"C\" void wcc_kernel'\n"
+    "// host wrapper below is what gets dlsym'd.\n"
+)
+
+HOST_WRAPPER_ANNOTATION = (
+    "// ===== HOST WRAPPER =====\n"
+    "// This is the entry symbol the verifier finds via dlsym(\"wcc_kernel\").\n"
+    "// Without 'extern \"C\"', the C++ compiler mangles the name and dlsym fails\n"
+    "// with `undefined symbol: wcc_kernel`. The four arguments are HOST POINTERS\n"
+    "// (numpy arrays passed via ctypes); this wrapper allocates device memory,\n"
+    "// copies host -> device, launches the __global__ kernels above, and copies\n"
+    "// labels device -> host.\n"
+)
+
+# Match `__global__` optionally followed by `__launch_bounds__(...)`, then
+# `void <name>(`. Capture the whole leading run so we can prepend cleanly.
+_DEVICE_KERNEL_RE = re.compile(
+    r'(__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?void\s+\w+\s*\()',
+)
+_HOST_WRAPPER_RE = re.compile(r'(extern\s+"C"\s+void\s+wcc_kernel\s*\()')
+
+
+def _inject_abi_annotations(code: str) -> str:
+    """Inject explicit ABI-axis role comments before every __global__ device
+    kernel and before the extern "C" host wrapper. Idempotent: re-running
+    on already-annotated code is a no-op because the regex matches the
+    declaration line itself, and the inserted annotation is placed on the
+    line *immediately before* the declaration.
+
+    To make it idempotent we explicitly skip insertion when the previous
+    line already contains the annotation marker.
+    """
+    def _device_repl(m: re.Match) -> str:
+        # Look back: if the chunk just before this match already contains
+        # the DEVICE KERNEL marker on the immediately preceding line, skip.
+        start = m.start()
+        prev_window = code[max(0, start - 200):start]
+        if "DEVICE KERNEL -- runs on GPU" in prev_window:
+            return m.group(0)
+        return DEVICE_KERNEL_ANNOTATION + m.group(0)
+
+    def _host_repl(m: re.Match) -> str:
+        start = m.start()
+        prev_window = code[max(0, start - 400):start]
+        if "===== HOST WRAPPER =====" in prev_window:
+            return m.group(0)
+        return HOST_WRAPPER_ANNOTATION + m.group(0)
+
+    # NOTE: we need to do both substitutions on the same string. Because
+    # the insertions shift offsets, just call .sub() which handles that.
+    out = _DEVICE_KERNEL_RE.sub(_device_repl, code)
+    out = _HOST_WRAPPER_RE.sub(_host_repl, out)
+    return out
 
 
 # Production doublegraph variant-76 wrapped with extern "C" entry.
@@ -499,6 +573,18 @@ def main() -> None:
         for line in fh:
             rows.append(json.loads(line))
 
+    # EXP-013-B: inject ABI-axis annotations into both production and simple
+    # kernels before writing them out.
+    annotated_production = _inject_abi_annotations(PRODUCTION_WCC_KERNEL)
+    annotated_simple = [_inject_abi_annotations(v) for v in SIMPLE_VARIANTS]
+
+    # Sanity: each annotated kernel must contain both marker strings.
+    assert "DEVICE KERNEL -- runs on GPU" in annotated_production
+    assert "===== HOST WRAPPER =====" in annotated_production
+    for i, v in enumerate(annotated_simple):
+        assert "DEVICE KERNEL -- runs on GPU" in v, f"simple v{i} missing device annotation"
+        assert "===== HOST WRAPPER =====" in v, f"simple v{i} missing host annotation"
+
     # Replace rows 76-79 with the production kernel (already there from EXP-011
     # but re-write to be sure / idempotent).
     for idx in WCC_INDICES_REPLACE:
@@ -506,13 +592,13 @@ def main() -> None:
         assert "Weakly Connected Components (WCC)" in row["messages"][1]["content"], (
             f"row {idx} is not a WCC entry"
         )
-        row["messages"][2]["content"] = "```cuda\n" + PRODUCTION_WCC_KERNEL + "```"
+        row["messages"][2]["content"] = "```cuda\n" + annotated_production + "```"
 
     # Append 4 simple variants. Reuse the existing 4 WCC prompts (one per
     # variant) so the model sees 2 valid completions per WCC prompt during
     # SFT — one production, one simple.
     new_rows = []
-    for variant_idx, variant_code in enumerate(SIMPLE_VARIANTS):
+    for variant_idx, variant_code in enumerate(annotated_simple):
         prompt_idx = WCC_INDICES_REPLACE[variant_idx]  # 76, 77, 78, 79
         src_row = rows[prompt_idx]
         new_row = {
@@ -546,13 +632,17 @@ def main() -> None:
 
     n_prod = 0
     n_simple = 0
+    n_wcc_rows = 0
     for i, r in enumerate(check_rows):
         c = r["messages"][2]["content"]
         if "Weakly Connected Components (WCC)" not in r["messages"][1]["content"]:
             continue
+        n_wcc_rows += 1
         has_extern_c = 'extern "C" void wcc_kernel(' in c
         has_launch_bounds = "__launch_bounds__(256)" in c
         has_ldg = "__ldg(" in c
+        has_device_marker = "DEVICE KERNEL -- runs on GPU" in c
+        has_host_marker = "===== HOST WRAPPER =====" in c
         if has_launch_bounds and has_ldg:
             n_prod += 1
             tag = "PRODUCTION"
@@ -562,12 +652,43 @@ def main() -> None:
         else:
             tag = "MIXED?"
         assert has_extern_c, f"row {i} missing extern C entry"
-        print(f"  row {i}: {tag} (len {len(c)} chars)")
+        assert has_device_marker, (
+            f"row {i} ({tag}) missing DEVICE KERNEL annotation -- "
+            f"EXP-013-B annotation injection failed"
+        )
+        assert has_host_marker, (
+            f"row {i} ({tag}) missing HOST WRAPPER annotation -- "
+            f"EXP-013-B annotation injection failed"
+        )
+        # Count DEVICE KERNEL annotations vs ACTUAL __global__ declarations
+        # (not just any mention of __global__ — the annotation comment itself
+        # contains the string "__global__" and would double-count).
+        n_device_markers = c.count("DEVICE KERNEL -- runs on GPU")
+        # An actual declaration matches `__global__ ... void name(` with no
+        # leading `//` comment on the same line.
+        decl_re = re.compile(
+            r'^[^/\n]*?__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?void\s+\w+\s*\(',
+            re.MULTILINE,
+        )
+        n_global_decls = len(decl_re.findall(c))
+        print(
+            f"  row {i}: {tag} (len {len(c)} chars, "
+            f"{n_device_markers} device markers / {n_global_decls} __global__ decls)"
+        )
+        assert n_device_markers == n_global_decls, (
+            f"row {i}: device marker count {n_device_markers} != "
+            f"__global__ declaration count {n_global_decls}"
+        )
 
     print(f"\nSelf-check: {n_prod} production rows, {n_simple} simple rows.")
+    assert n_wcc_rows == 8, f"expected exactly 8 WCC rows, got {n_wcc_rows}"
     assert n_prod == 4, f"expected 4 production WCC rows, got {n_prod}"
     assert n_simple == 4, f"expected 4 simple WCC rows, got {n_simple}"
-    print("OK: 4 production + 4 simple WCC rows, all expose extern C contract.")
+    print(
+        "OK: 4 production + 4 simple WCC rows, all expose extern C contract "
+        "AND carry EXP-013-B ABI-axis annotations on every __global__ kernel "
+        "+ host wrapper."
+    )
 
 
 if __name__ == "__main__":
