@@ -10,12 +10,26 @@ Set KERNELFORGE_EVAL_BACKEND to control dispatch:
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from typing import Any
 
 EVAL_BACKEND = os.getenv("KERNELFORGE_EVAL_BACKEND", "coreweave")
 EVAL_URL = os.getenv("KERNELFORGE_EVAL_URL", "")
 MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
+
+# Subprocess timeout (seconds) per single eval call. Caps user-kernel
+# infinite loops and runaway compiles from blocking the trainer.
+EVAL_SUBPROCESS_TIMEOUT = int(os.getenv("KERNELFORGE_EVAL_SUBPROCESS_TIMEOUT", "180"))
+
+# Functions whose execution may corrupt CUDA context (run arbitrary user
+# kernels). Always dispatched through `eval_service/worker_main.py`
+# subprocess so a CUDA fault kills only the worker, not the trainer.
+# Diagnosed 2026-05-26 EXP-014-retry: in-process ops6k eval triggered
+# `cudaErrorIllegalAddress` and killed training at step 4.
+_ISOLATED_FNS = {"evaluate_kernel", "evaluate_ops6k_kernel", "evaluate_kernels_batch"}
 
 
 def dispatch_eval(fn_name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -60,33 +74,89 @@ def _dispatch_modal(fn_name: str, payload: dict[str, Any] | None) -> dict[str, A
     return fn.remote(payload)
 
 
+def _safe_local_failure(reason: str) -> dict[str, Any]:
+    return {
+        "compiles": False,
+        "correct": False,
+        "error": f"Local eval error: {reason[:1000]}",
+        "runtime_ms": 0.0,
+        "runtime_stats": {},
+        "speedup_vs_orig": 0.0,
+        "speedup_vs_dg": 0.0,
+    }
+
+
+def _dispatch_local_subprocess(
+    fn_name: str, payload: dict[str, Any] | list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """Run a single eval call in an isolated subprocess via worker_main.
+
+    If the subprocess crashes (CUDA fault, OOM, etc.) the parent reads
+    the non-zero return code and returns a safe failure dict; training
+    continues unaffected. Timeout caps runaway kernels.
+    """
+    req = json.dumps({"fn_name": fn_name, "payload": payload})
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "eval_service.worker_main"],
+            input=req,
+            capture_output=True,
+            text=True,
+            timeout=EVAL_SUBPROCESS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return _safe_local_failure(
+            f"subprocess timeout ({EVAL_SUBPROCESS_TIMEOUT}s)"
+        )
+    except FileNotFoundError as exc:
+        return _safe_local_failure(f"subprocess spawn failed: {exc}")
+
+    if proc.returncode != 0:
+        # Subprocess died (likely CUDA fault) — stdout JSON may be missing.
+        return _safe_local_failure(
+            f"subprocess exit {proc.returncode}: "
+            f"stderr={proc.stderr[:400]} stdout={proc.stdout[:200]}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return _safe_local_failure(
+            f"subprocess produced non-JSON stdout: {proc.stdout[:500]}"
+        )
+
+
 def _dispatch_local(
     fn_name: str, payload: dict[str, Any] | list[dict[str, Any]] | None
 ) -> dict[str, Any]:
     """Dispatch in-process on the current GPU. Mirrors eval_service/app.py routing.
 
     This is the zero-external-cost path: training and eval run inside the same
-    slurm allocation, so eval_core is imported and called directly. Requires
-    a CUDA-capable GPU on the current node (nvcc + torch.cuda.is_available()).
+    slurm allocation. CUDA-execution functions (`evaluate_kernel`,
+    `evaluate_ops6k_kernel`, `evaluate_kernels_batch`) are routed through an
+    isolated subprocess (see `eval_service/worker_main.py`) so user-kernel
+    CUDA faults cannot corrupt the trainer's CUDA context. Diagnostic
+    functions (`profile_baselines`, `test_gpu_features`) stay in-process —
+    they only call internal CUDA paths we trust.
+
+    Requires a CUDA-capable GPU on the current node (nvcc + torch.cuda.is_available()).
     """
+    if fn_name in _ISOLATED_FNS:
+        return _dispatch_local_subprocess(fn_name, payload)
+
+    # In-process path for trusted diagnostic functions only.
     from eval_service.eval_core import (
-        evaluate_kernel_impl,
-        evaluate_kernels_batch_impl,
-        evaluate_ops6k_kernel_impl,
         profile_baselines_impl,
         test_gpu_features_impl,
     )
 
     dispatch_table = {
-        "evaluate_kernel": lambda p: evaluate_kernel_impl(p or {}),
-        "evaluate_ops6k_kernel": lambda p: evaluate_ops6k_kernel_impl(p or {}),
-        "evaluate_kernels_batch": lambda p: evaluate_kernels_batch_impl(p or []),
         "profile_baselines": lambda _p: profile_baselines_impl(),
         "test_gpu_features": lambda _p: test_gpu_features_impl(),
     }
     if fn_name not in dispatch_table:
         raise ValueError(
-            f"Unknown eval fn_name: {fn_name!r}. Valid: {sorted(dispatch_table)}"
+            f"Unknown eval fn_name: {fn_name!r}. "
+            f"Valid: {sorted(dispatch_table) + sorted(_ISOLATED_FNS)}"
         )
 
     try:
@@ -94,12 +164,4 @@ def _dispatch_local(
     except Exception as exc:
         # Mirror eval_service/app.py:global_exception_handler so caller code
         # behaves the same regardless of backend.
-        return {
-            "compiles": False,
-            "correct": False,
-            "error": f"Local eval error: {str(exc)[:1000]}",
-            "runtime_ms": 0.0,
-            "runtime_stats": {},
-            "speedup_vs_orig": 0.0,
-            "speedup_vs_dg": 0.0,
-        }
+        return _safe_local_failure(str(exc))
