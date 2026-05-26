@@ -95,6 +95,18 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
     if not LOCAL_COMPILE_CHECK:
         return True, ""
 
+    # EXP-014 (2026-05-25): ops6k kernels include `<torch/extension.h>` which
+    # bare nvcc can't find without torch's include paths. The remote ops6k
+    # eval (`eval_service/eval_core.py:evaluate_ops6k_kernel_impl`) uses
+    # `torch.utils.cpp_extension.load_inline` which handles torch includes
+    # correctly. Skip the local pre-check for ops6k-shaped code; otherwise
+    # 100% of ops6k rollouts compile_fail at the pre-check stage with
+    # "fatal error: torch/extension.h: No such file or directory" and never
+    # reach the real evaluator. Verified on EXP-014 job 7015618 (82/82
+    # compile_fail with identical missing-header error).
+    if "torch/extension.h" in code or "PYBIND11_MODULE" in code:
+        return True, ""
+
     try:
         with tempfile.NamedTemporaryFile(suffix=".cu", mode="w", delete=False) as f:
             f.write(code)
