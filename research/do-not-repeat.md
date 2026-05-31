@@ -343,6 +343,133 @@ reward distribution in EXP-008 must be re-tested after the bypass fix.
   the new SFT'd model is verified to EOS naturally under 1024. Until
   then, default to >=2048.
 
+## 2026-05-28 — Sakana SFT + ops6k torch-extension eval path is a reward-hack channel via torch:: C++ API
+
+- what was tried: EXP-015'-A (job 7040100) Stage 1 GRPO on ops6k tasks with
+  Sakana 400 SFT prior, `eval_backend=local` (subprocess-isolated), reward
+  v3-symbol-shaped. Produced 5 unique `correct=True` rollouts out of 80
+  (6.25% pass_rate, originally double-counted as 10/152) — claimed as the
+  first correct=True signal in project history and unconditionally
+  promoted to master under the cold-start rule.
+- why it was reward-hacked: the ops6k evaluation path
+  ([eval_service/eval_core.py:588](eval_service/eval_core.py#L588)
+  `evaluate_ops6k_kernel_impl`) does **NOT** call
+  `scan_forbidden_symbols` after compile — only the WCC path at L356 does.
+  Combined with:
+  - **SFT bias**: every one of the 400 Sakana SFT rows
+    (`datasets/sakana_sft.jsonl`) demonstrates `#include <torch/extension.h>`
+    + `torch::Tensor run_kernel(torch::Tensor)` style. 400/400 grep hit on
+    `torch::|at::Tensor|c10::|torch.nn`.
+  - **Loose tolerance**: `_assert_close` ([eval_core.py:161](eval_service/eval_core.py#L161))
+    uses `rtol=1e-3, atol=1e-3` — 1000x looser than torch default.
+  - **anti_hack runtime checks are blind to this attack**: the candidate
+    kernel can `return torch::relu(x)` or `return x.softmax(-1)` directly
+    inside the .cu source; output is non-constant (real op), not
+    passthrough (output differs from input element-wise), not no-op
+    (>1μs runtime due to pybind + libtorch overhead), shapes match —
+    every check passes vacuously.
+  - **Smoking gun in the log**: 4 of 5 correct=True rollouts had
+    `sv_eager < 1.0` (0.17, 0.77, 0.04, 0.77) — meaning the candidate
+    was 6-23x SLOWER than eager PyTorch. A real hand-written CUDA
+    kernel on simple ops shouldn't be 23x slower than eager. This is
+    exactly the overhead profile of pybind + libtorch op dispatch
+    wrapped in a custom extension.
+- evidence:
+  - EXP-015'-A (slurm 7040100) `logs/kf_stage1_7040100.out`
+  - `grep scan_forbidden_symbols eval_service/eval_core.py` shows only
+    one call site, at L356 inside `evaluate_kernel_impl` (the WCC
+    path); zero references inside `evaluate_ops6k_kernel_impl`.
+  - `grep -coE 'torch::|at::Tensor|c10::|torch.nn' datasets/sakana_sft.jsonl`
+    returns 400 of 400 rows.
+- conceptual family ruled out: **any ops6k eval path that (a) builds
+  the candidate via `torch.utils.cpp_extension.load(..., with_cuda=True)`
+  so libtorch is linked, AND (b) lacks a mechanism to prevent the
+  candidate from calling libtorch ops at runtime**. Naive
+  `scan_forbidden_symbols` on the .so is NOT a sufficient mechanism —
+  every torch-extension .so links libtorch, so `nm -D` is guaranteed to
+  show `torch::`/`at::`/`c10::` symbols regardless of whether the
+  candidate is legitimate. The check would false-positive every kernel,
+  which is why the ops6k path lacked the call in the first place — and
+  why simply wiring it in does NOT fix the hole.
+- conditions under which it could be revisited: the channel requires a
+  structural anti-hack. Two known options:
+  1. **C++ Dispatch interception**: inside the eval subprocess, register
+     a high-priority `TORCH_LIBRARY_IMPL` fallback that captures all
+     `aten::*` calls and throws unless whitelisted (only Tensor
+     construction/accessors allowed). Then `dlopen` the candidate.
+  2. **Raw `extern "C"` contract**: redesign ops6k to match WCC — raw
+     pointers, no libtorch link, eval harness handles `cudaMalloc`/
+     `Memcpy`. Forces the candidate to write actual CUDA. Cost: full
+     SFT corpus rebuild (Sakana 400 rows all use torch::).
+  Cheap stopgap (does NOT fully close): source-level regex scan for
+  obvious calls (`torch::relu(`, `.softmax(`, `at::*` op names) — model
+  can bypass via aliases / vendored algorithms but it forces hack
+  attempts to be less trivial.
+- master action taken: `research/live/master.json` rolled back to
+  `hash=null` on 2026-05-28; `results.tsv` row renamed to
+  `EXP-015'-A-INVALIDATED` with `promote=false`; cold-start gate
+  re-opened.
+
+## 2026-05-28 — Project history has NEVER produced a multi-step monotone mean_reward training curve
+
+- what is observable from EXP-001 through EXP-015'-A: every recorded
+  Stage 1 GRPO run on this codebase has either
+  (a) collapsed to flat `reward=-1` with `reward_std=0, grad_norm=0`
+  for the full run (EXP-001..EXP-008 family), or
+  (b) produced a single non-(-1) data point at step 1 (EXP-009-B,
+  one 22-min run, never extended), or
+  (c) produced "correct=True" signal that was subsequently shown to be
+  reward-hacked (EXP-015'-A, see 2026-05-28 entry above).
+- what has NEVER been observed: a multi-step training curve where
+  `mean_reward` increases monotonically (or even trends up across
+  ≥ 3 steps) under a non-hacked reward path. The full project budget
+  to date has gone into infrastructure surgery and reward-bypass
+  removal. Whether the actual RL signal — once anti-hack is structural
+  and SFT is contract-aligned — is dense enough to move the policy
+  remains an open empirical question that has not been tested even
+  once.
+- generalizable rule: **before committing budget to ablations or
+  scaling, run a cheap verification spike that demonstrates the
+  pipeline produces a non-flat positive-trajectory training curve
+  on a small task pool under the patched evaluator**. If that spike
+  fails, none of the downstream investment (vLLM optimization,
+  multi-GPU DDP, SFT corpus rebuild, Phase 2 Ablation 1/2/3) is
+  justified. See `research/experiments/EXP-016p-spike.md` for the
+  spike spec.
+- conditions under which broader investment could be authorized: spike
+  produces a training curve where `mean_reward` at the last 10 steps
+  is strictly greater than the first 10 steps, with confidence
+  surviving a per-step bootstrap. Until then, treat all multi-month
+  / multi-thousand-dollar plans as conditional.
+
+## 2026-05-27 — Treating a 7% correct rate (Wilson lower bound 3.6%) as a stable steady-state signal
+
+- what NOT to do: cite EXP-015'-A's `pass_rate=0.066` (10/152 correct,
+  Wilson 95% CI `[3.6%, 11.7%]`) as evidence of a *steady-state* policy
+  capability, or use it as the comparability baseline for downstream
+  knob ablations.
+- why: this is a **phase-transition signature**, not a converged rate.
+  Three independent fixes (commits 3b28c36, 61af7f5, 8989ac4) landed
+  simultaneously over a 20-step run from a fresh SFT prior; the
+  cold-start promotion was unconditional per the convention banner, not
+  a quality assertion. The lower bound 3.6% is barely above zero, and
+  the 7% point estimate sits on top of a high-variance Bernoulli over
+  152 rollouts. Treating it as steady-state risks (a) premature
+  declarations of "we cleared cold-start" leading to misallocated
+  ablation budget, and (b) noise-driven false negatives on EXP-016+
+  downstream tests because the parent baseline itself is sampling-noisy.
+- evidence: EXP-015'-A (slurm 7040100). Bucket distribution heavily
+  skewed (63% compile_fail, 30% compile_OK_wrong) — the policy is still
+  failing at the compile gate two-thirds of the time. A 7% correctness
+  rate observed during a transient unblock is consistent with a true
+  underlying rate anywhere in `[3.6%, 11.7%]`, not "the rate".
+- conditions under which the rate could be cited as a real baseline:
+  EXP-016 (24-step extension) must show (a) the slope continuing
+  upward (`correct/rollouts` increasing in the last 8 steps relative
+  to the first 8), AND (b) Wilson CI tightening with more samples. Only
+  after a second run reproduces correct>=7% across a non-overlapping
+  rollout sample does the rate become a stable comparability anchor.
+
 ## 2026-05-18 — Probes that rely on `[ROLLOUT]` debug from `multi_turn_rollout.py`
 
 - what was tried: every prior diagnostic that depended on per-rollout

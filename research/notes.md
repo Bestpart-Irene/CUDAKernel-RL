@@ -452,3 +452,113 @@ The path forward is no longer "try another knob". It is one of:
   `[ROLLOUT_INLINE]` / `[VERIFIER_INLINE]`. Use these going forward.
 - evidence: slurm 6888764 stdout/stderr — single `[ROLLOUT_FACTORY]`
   line, zero `[ROLLOUT_CALL]` lines.
+
+## 2026-05-27 — EXP-015'-A — FIRST correct=True IN PROJECT HISTORY (cold-start master promotion)
+
+- hypothesis: stacking three independently-shipped fixes — subprocess
+  isolation for CUDA eval (commit 3b28c36), skipping `_local_compile_check`
+  pre-check for ops6k-shaped code (commit 61af7f5), and ABI-axis annotations
+  injected into all 8 WCC SFT rows (commit 8989ac4) — unlocks the first
+  `correct=True` signal on Stage 1 GRPO over ops6k tasks.
+- parent master hash: null (cold-start)
+- variable changed: three stacked fixes (NOT a single-variable run, but
+  cold-start admits the first parseable mean_reward + pass_rate run
+  unconditionally per the convention banner above):
+  - `eval_backend` :: in-process eval :: subprocess-isolated CUDA execution
+    (commit 3b28c36)
+  - `_local_compile_check` :: pre-check on ops6k-shaped code :: skipped
+    (commit 61af7f5)
+  - `datasets/doublegraph_sft.jsonl` :: WCC entries without ABI annotation
+    :: 8 rows annotated with ABI-axis (commit 8989ac4)
+- runner / job id: explorer-h200 / slurm 7040100 (COMPLETED, walltime
+  6:30:16, max_steps=20 all completed)
+- config: Stage 1 GRPO, 20 steps, ops6k task pool, eval_backend=local
+  (subprocess), SFT prior = Sakana 400 (commit 51cb391)
+- metrics:
+  - 152 rollouts total
+  - bucket distribution: compile_fail=96 (63%), compile_OK_wrong=46 (30%),
+    **correct=10 (7%) — FIRST IN PROJECT HISTORY**
+  - mean_reward ≈ -0.86 (estimated from bucket mix under v2-shaped:
+    compile_fail -> -1, compile_OK_wrong -> 0, correct -> +1; with 7%
+    correct and 30% zero-shaped wrong, weighted mean ≈ -0.86)
+  - pass_rate = 10/152 = 0.066
+  - Wilson 95% CI on pass_rate: [3.6%, 11.7%]
+  - failure taxonomy: compile_fail_extension_build=38 (48%),
+    wrong_other=14 (18%), compile_fail_other=14 (18%),
+    **wrong_pybind_signature=7 (9%) — was 31% in EXP-014, 3.4x reduction**,
+    correct=5 (6%, ROLLOUT_INLINE count), wrong_numerical_mismatch=2 (2%)
+- decision: **promote — cold-start unconditional promotion**. Master was
+  `hash=null`; per the convention banner, the first managed run producing
+  parseable `mean_reward` and `pass_rate` is unconditionally promoted.
+  EXP-015'-A is the first such run, and additionally crosses the
+  historically-unreached `correct=True` boundary.
+- interpretation: After EXP-009-B unlocked compile-rate signal but
+  produced zero correct rollouts, three orthogonal fixes were needed to
+  cross the correctness boundary: (1) subprocess isolation prevents CUDA
+  context corruption from poisoning subsequent rollouts in the same
+  process; (2) skipping pre-check on ops6k-shaped extension code stops
+  spurious rejection of well-formed kernels at the host-Python layer;
+  (3) ABI-axis annotations in the SFT corpus teach the model the
+  signature convention the verifier expects, collapsing the
+  `wrong_pybind_signature` bucket from 31% (EXP-014) to 9% — a 3.4x
+  reduction — and freeing rollouts to compete on numerical correctness.
+  7% correct (Wilson lower bound 3.6%) is a **phase transition
+  signature**, not a stable steady-state rate. EXP-016 (24-step
+  extension) will confirm whether the slope continues upward and provide
+  a tighter sample for re-promotion against a real (non-null) master.
+
+> **Note**: master was promoted to EXP-015'-A on 2026-05-27. The
+> promotion documents the cold-start unblock; the next promotion gate
+> (EXP-016 or successor) is the standard non-null-master gate: strictly
+> greater `mean_reward`, non-regressed `pass_rate`, matching
+> eval_split / seed_count / max_turns / reward_version / eval_backend.
+
+## 2026-05-28 — EXP-015'-A promotion INVALIDATED; master rolled back to null
+
+- finding: all 5 unique `correct=True` rollouts in EXP-015'-A were
+  reward-hacked via direct `torch::` C++ API calls from inside the
+  candidate `.cu` source. The ops6k evaluation path
+  (`eval_service/eval_core.py::evaluate_ops6k_kernel_impl`, L588) does
+  not call `scan_forbidden_symbols`; the candidate is built via
+  `torch.utils.cpp_extension.load(..., with_cuda=True)` which links
+  libtorch and makes `#include <torch/extension.h>` + `torch::relu(x)`
+  / `x.softmax(-1)` style delegation a valid compile path. The Sakana
+  400 SFT corpus demonstrates this style on 400/400 rows, so the SFT
+  prior actively biases the model toward the hack. Anti-hack runtime
+  checks (not_constant / not_passthrough / not_noop / shapes_match)
+  are blind to this attack because the delegated torch op produces a
+  real, input-dependent, non-trivial output.
+- corroborating evidence: 4 of 5 correct rollouts had `sv_eager < 1.0`
+  (0.17, 0.77, 0.04, 0.77), meaning the candidate was 6-23x slower
+  than eager PyTorch — exactly the overhead profile of pybind + torch
+  op dispatch wrapped inside a custom extension. A hand-written CUDA
+  kernel on simple ops should not be 23x slower than eager.
+- audit also revealed that the original promotion record's
+  `rollouts_total=152` and `correct=10` are double-counts:
+  `compute_reward` is called twice per rollout (once inside
+  `evaluate_code_remote::compute_task_reward` at task_support.py:311,
+  once inside `reward_from_env::_compute_reward_from_result` at
+  multi_turn_rollout.py:454) and the COMPUTE_REWARD print emits twice.
+  Real counts: 80 unique rollouts, 5 unique correct=True. The pass_rate
+  ratio (~6%) is unchanged but the sample size is half what was
+  recorded.
+- actions taken:
+  - `research/live/master.json` rolled back to `hash=null`. Cold-start
+    gate re-opened.
+  - `research/results.tsv` row renamed `EXP-015'-A-INVALIDATED`,
+    `promote=false`. Reward_version corrected from `v2-shaped` to
+    `v3-symbol-shaped` (log evidence: every `[COMPUTE_REWARD]` line in
+    `logs/kf_stage1_7040100.out` carries `version=v3-symbol-shaped`;
+    the original record's `v2-shaped` was incorrect).
+  - `research/do-not-repeat.md` entry 2026-05-28 documents the failure
+    family and notes that the naive fix (wire `scan_forbidden_symbols`
+    into the ops6k path) does NOT close the hole — every torch
+    extension links libtorch, so `nm -D` would false-positive every
+    legitimate kernel.
+- next: the path forward is gated by `EXP-016p-spike`
+  (`research/experiments/EXP-016p-spike.md`), a verification-only run
+  that tests whether the GRPO pipeline produces a multi-step
+  monotone-trend `mean_reward` curve under a patched evaluator on the
+  simplest possible ops6k task pool. Project history has never
+  produced such a curve. Until the spike either passes or fails, no
+  further investment is authorized.
