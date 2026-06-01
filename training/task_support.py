@@ -133,6 +133,11 @@ def normalize_task_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized["task_code"] = (
         str(normalized.get("task_code")).strip() if normalized.get("task_code") else None
     )
+    # EXP-018a: preserve extern_c_signature dict if present. The eval path uses
+    # it to pick the right ctypes argtypes; absent means evaluator falls back
+    # to inferring from task_code's get_inputs() tensor count.
+    sig = normalized.get("extern_c_signature")
+    normalized["extern_c_signature"] = sig if isinstance(sig, dict) else None
     backend = infer_evaluation_backend(normalized)
     normalized["evaluation_backend"] = backend
     normalized["supports_evaluation"] = backend in {"wcc", "ops6k"}
@@ -173,13 +178,37 @@ def task_interface_contract(row: dict[str, Any]) -> str:
             "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
         )
     if backend == "ops6k":
+        sig = (row.get("extern_c_signature") or {}).get("class", "E1")
+        if sig == "E2":
+            sig_line = (
+                'extern "C" void run_kernel(const float* x, const float* y, '
+                "float* out, int n)"
+            )
+            arg_desc = (
+                "  `x` and `y` are device pointers to the two input tensors flattened to 1D.\n"
+                "  `out` is a pre-allocated device pointer for the output (same total element "
+                "count as the reference output).\n"
+                "  `n` is the total element count."
+            )
+        else:  # E1 default
+            sig_line = 'extern "C" void run_kernel(const float* x, float* out, int n)'
+            arg_desc = (
+                "  `x` is a device pointer to the input tensor flattened to 1D.\n"
+                "  `out` is a pre-allocated device pointer for the output (same total element "
+                "count as the reference output).\n"
+                "  `n` is the total element count."
+            )
         return (
-            "Evaluation contract:\n"
-            "- Produce a single PyTorch CUDA extension source file.\n"
-            "- Include `#include <torch/extension.h>` and a `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)` block.\n"
-            '- Export `m.def("run_kernel", &run_kernel)`.\n'
-            "- `run_kernel(*inputs)` must accept the tensors returned by `get_inputs()` and return outputs "
-            "matching `Model(*inputs)`.\n"
+            "Evaluation contract (EXP-018a unified extern \"C\"):\n"
+            "- Produce a single raw CUDA source file. Do NOT include "
+            "`<torch/extension.h>`, `<ATen/...>`, or `<c10/...>`. Do NOT "
+            "reference `torch::`, `at::`, or `c10::` in any form.\n"
+            f"- Export `{sig_line}`.\n"
+            f"{arg_desc}\n"
+            "- The function must launch your `__global__` CUDA kernel and "
+            "cudaDeviceSynchronize before returning.\n"
+            "- Output values must match the reference `Model(*get_inputs())` "
+            "result element-wise to within rtol=1e-3, atol=1e-3.\n"
             "- Return CUDA/C++ code only.\n"
             "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
         )
@@ -224,6 +253,7 @@ def build_modal_payload(
                 "warmup_iters": 10,
                 "benchmark_runs": 10,
                 "evaluation_backend": backend,
+                "extern_c_signature": row.get("extern_c_signature"),
             },
         )
 

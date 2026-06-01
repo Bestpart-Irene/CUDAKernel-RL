@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols
+from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols, scan_source_forbidden
 
 # --- Configuration (from env vars, same defaults as modal_app.py) ---
 
@@ -585,26 +585,77 @@ def evaluate_kernels_batch_impl(payloads: list[dict]) -> list[dict]:
     return results
 
 
+def _infer_extern_c_signature(task_code: str) -> dict | None:
+    """Best-effort: 1 input tensor -> E1, 2 -> E2. Returns None if non-trivial."""
+    import torch  # local import to keep module load light when CUDA absent
+
+    try:
+        ns: dict = {}
+        exec(task_code, ns)
+        get_inputs = ns.get("get_inputs")
+        if get_inputs is None:
+            return None
+        sample = get_inputs()
+        if not isinstance(sample, (list, tuple)):
+            sample = [sample]
+        tensor_inputs = [x for x in sample if isinstance(x, torch.Tensor)]
+        if len(tensor_inputs) == 1:
+            return {"class": "E1"}
+        if len(tensor_inputs) == 2:
+            return {"class": "E2"}
+        return None
+    except Exception:
+        return None
+
+
+def _ctypes_argtypes(sig_class: str) -> list:
+    import ctypes
+    if sig_class == "E1":
+        return [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+    if sig_class == "E2":
+        return [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+    raise NotImplementedError(f"Signature class {sig_class} not yet wired")
+
+
+def _invoke_candidate(run_kernel_fn, sig_class: str, tensor_inputs: list, out_buf):
+    n = out_buf.numel()
+    if sig_class == "E1":
+        run_kernel_fn(tensor_inputs[0].data_ptr(), out_buf.data_ptr(), n)
+    elif sig_class == "E2":
+        run_kernel_fn(
+            tensor_inputs[0].data_ptr(),
+            tensor_inputs[1].data_ptr(),
+            out_buf.data_ptr(),
+            n,
+        )
+    else:
+        raise NotImplementedError(f"Signature class {sig_class} not yet wired")
+
+
 def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
     """
-    Evaluate a CUDA kernel against a PyTorch reference from CUDA-Agent-Ops-6K.
+    Evaluate a CUDA kernel against a PyTorch reference under the unified
+    extern "C" + dlsym contract (EXP-018a / CAMPAIGN-018).
 
-    Input:
-        cuda_code: str     - LLM-generated CUDA kernel source
-        task_code: str     - PyTorch reference (Model class + get_inputs + get_init_inputs)
-        warmup_iters: int  - warmup iterations (default 10)
-        benchmark_runs: int - timed runs (default 10)
+    The candidate must:
+      - NOT include <torch/extension.h>, <ATen/...>, or <c10/...>
+      - NOT reference torch:: / at:: / c10::
+      - expose `extern "C" void run_kernel(const float* in..., float* out, int n)`
 
-    Returns:
-        compiles: bool
-        correct: bool
-        runtime_ms: float
-        baseline_eager_ms: float
-        baseline_compile_ms: float
-        speedup_vs_orig: float
-        speedup_vs_dg: float
-        error: str
+    The harness compiles via raw nvcc (no libtorch link), dlopen+dlsym the
+    candidate, and invokes via ctypes with cudaMalloc-backed torch tensor
+    pointers. Reference computation stays in Python via the task's PyTorch
+    Model class; this is only used to produce expected outputs and timing
+    baselines, never inside the candidate call path.
+
+    Input payload:
+        cuda_code: str
+        task_code: str
+        warmup_iters: int (default 10)
+        benchmark_runs: int (default 10)
+        extern_c_signature: dict | None  (optional; inferred from task if absent)
     """
+    import ctypes
     import importlib.util
     import sys
     import torch
@@ -613,6 +664,7 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
     task_code = payload.get("task_code", "")
     warmup_iters = int(payload.get("warmup_iters", 10))
     benchmark_runs = int(payload.get("benchmark_runs", 10))
+    extern_c_signature = payload.get("extern_c_signature")
 
     result = {
         "compiles": False,
@@ -633,9 +685,29 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
     if not _ops_task_supported(task_code):
         result["error"] = (
             "Unsupported Ops task for live evaluation: only stateless tasks with empty "
-            "get_init_inputs() are executable with the current extension harness."
+            "get_init_inputs() are executable with the current harness."
         )
         return result
+
+    # === Step 1: source-level forbidden-pattern pre-scan ===
+    # Closes the EXP-015'-A torch::-API delegation channel BEFORE compile.
+    # Because we then link no libtorch, post-link nm scan stays meaningful.
+    reject_reason = scan_source_forbidden(cuda_code)
+    if reject_reason:
+        result["error"] = f"Source rejected: {reject_reason}"
+        result["verifier_msg"] = result["error"]
+        return result
+
+    # === Step 2: infer signature if caller didn't supply one ===
+    if not extern_c_signature:
+        extern_c_signature = _infer_extern_c_signature(task_code)
+    if not extern_c_signature:
+        result["error"] = (
+            "Could not infer extern_c_signature from task_code "
+            "(expects 1-2 tensor inputs for E1/E2 auto-class)."
+        )
+        return result
+    sig_class = extern_c_signature.get("class")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         model_path = os.path.join(tmpdir, "model.py")
@@ -646,41 +718,41 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
         with open(kernel_path, "w", encoding="utf-8") as f:
             f.write(cuda_code)
 
+        so_path = os.path.join(tmpdir, "kernel.so")
+
+        # === Step 3: raw nvcc compile (NO libtorch linkage) ===
+        nvcc_cmd = _nvcc_command(kernel_path, so_path, cuda_code, shared=True)
         try:
-            sys.path.insert(0, tmpdir)
-            import torch.utils.cpp_extension as cpp_ext
-
-            build_dir = os.path.join(tmpdir, "build")
-            os.makedirs(build_dir, exist_ok=True)
-
-            module_name = _module_name("ops_kernel", cuda_code)
-            extra_cuda_cflags = ["-O3", f"-arch={TARGET_CUDA_ARCH}"]
-            extra_cuda_cflags.extend(extract_cu_flags(cuda_code) or ["--use_fast_math"])
-            extension = cpp_ext.load(
-                name=module_name,
-                sources=[kernel_path],
-                build_directory=build_dir,
-                verbose=False,
-                with_cuda=True,
-                extra_cflags=["-O3", "-std=c++17"],
-                extra_cuda_cflags=list(dict.fromkeys(extra_cuda_cflags)),
-            )
-            if not hasattr(extension, "run_kernel"):
-                result["error"] = (
-                    "Compiled extension does not expose run_kernel. "
-                    "Return a PYBIND11_MODULE with m.def(\"run_kernel\", &run_kernel)."
-                )
-                return result
-            result["compiles"] = True
-        except Exception as exc:
-            result["error"] = f"Compilation failed: {str(exc)[:1500]}"
+            proc = subprocess.run(nvcc_cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            result["error"] = "Compilation timed out (120s)"
             return result
-        finally:
-            try:
-                sys.path.remove(tmpdir)
-            except ValueError:
-                pass
+        except FileNotFoundError:
+            result["error"] = "nvcc not in PATH"
+            return result
+        if proc.returncode != 0:
+            result["error"] = f"Compilation failed: {proc.stderr[:1500]}"
+            return result
+        result["compiles"] = True
 
+        # === Step 4: symbol probe (v3-symbol-shaped reward driver) ===
+        nm_proc = subprocess.run(
+            ["nm", "-D", so_path], capture_output=True, text=True, timeout=10
+        )
+        if "run_kernel" not in nm_proc.stdout:
+            msg = "Kernel FFI verification failed: undefined symbol: run_kernel"
+            result["verifier_msg"] = msg
+            result["error"] = msg
+            return result
+
+        # === Step 5: forbidden post-link symbol scan (now meaningful) ===
+        forbidden = scan_forbidden_symbols(so_path)
+        if forbidden:
+            result["error"] = f"Anti-hack post-link scan: {forbidden}"
+            result["verifier_msg"] = result["error"]
+            return result
+
+        # === Step 6: load reference model from task_code ===
         try:
             torch.manual_seed(42)
             spec = importlib.util.spec_from_file_location("ref_model", model_path)
@@ -699,32 +771,48 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             result["error"] = f"Reference model load failed: {str(exc)[:500]}"
             return result
 
+        # === Step 7: dlopen + dlsym candidate ===
         try:
-            # Collect outputs for anti-hack checks (need 2+ distinct input sets)
-            anti_hack_candidate_outputs = []
-            anti_hack_ref_outputs = []
-            anti_hack_inputs = []
+            lib = ctypes.CDLL(so_path)
+            run_kernel = lib.run_kernel
+            run_kernel.argtypes = _ctypes_argtypes(sig_class)
+            run_kernel.restype = None
+        except Exception as exc:
+            result["error"] = f"dlsym failed: {str(exc)[:300]}"
+            result["verifier_msg"] = result["error"]
+            return result
 
+        # === Step 8: correctness via candidate calls across 5 seeds ===
+        anti_hack_candidate_outputs = []
+        anti_hack_ref_outputs = []
+        anti_hack_inputs = []
+        try:
             for seed in range(5):
                 torch.manual_seed(42 + seed)
                 test_inputs = ref_mod.get_inputs()
                 if not isinstance(test_inputs, (list, tuple)):
                     test_inputs = [test_inputs]
                 test_inputs = _move_to_cuda(test_inputs, torch)
-                ref_inputs = _clone_value(test_inputs)
-                candidate_inputs = _clone_value(test_inputs)
+                # Only tensor inputs are passed to extern "C"; scalar/int args
+                # are not yet wired (would belong in `extra_args` per spec)
+                tensor_inputs = [
+                    t.contiguous().float() for t in test_inputs if isinstance(t, torch.Tensor)
+                ]
 
                 with torch.no_grad():
-                    ref_output = ref_model(*ref_inputs)
-                    candidate_output = extension.run_kernel(*candidate_inputs)
+                    ref_output = ref_model(*test_inputs)
+                ref_output_f = ref_output.contiguous().float()
 
-                _assert_close(candidate_output, ref_output, torch)
+                candidate_output = torch.empty_like(ref_output_f)
+                _invoke_candidate(run_kernel, sig_class, tensor_inputs, candidate_output)
+                torch.cuda.synchronize()
 
-                # Stash first 2 for anti-hack checks
+                _assert_close(candidate_output, ref_output_f, torch)
+
                 if seed < 2:
                     anti_hack_candidate_outputs.append(_clone_value(candidate_output))
-                    anti_hack_ref_outputs.append(_clone_value(ref_output))
-                    anti_hack_inputs.append(_clone_value(test_inputs))
+                    anti_hack_ref_outputs.append(_clone_value(ref_output_f))
+                    anti_hack_inputs.append(_clone_value(tensor_inputs))
 
             result["correct"] = True
             result["verifier_msg"] = "Outputs matched reference for 5 random seeds"
@@ -733,7 +821,7 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             result["verifier_msg"] = result["error"]
             return result
 
-        # Anti-hack checks (Dr. Kernel-inspired)
+        # === Step 9: anti-hack runtime checks ===
         try:
             from openenv_env.anti_hack import (
                 check_not_passthrough,
@@ -741,7 +829,6 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                 check_shapes_match,
             )
 
-            # Shape check
             if anti_hack_ref_outputs:
                 passed, reason = check_shapes_match(
                     anti_hack_candidate_outputs[0], anti_hack_ref_outputs[0]
@@ -752,7 +839,6 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                     result["verifier_msg"] = result["error"]
                     return result
 
-            # Constant output check
             if len(anti_hack_candidate_outputs) >= 2:
                 passed, reason = check_output_not_constant(
                     anti_hack_candidate_outputs[0], anti_hack_candidate_outputs[1]
@@ -763,7 +849,6 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                     result["verifier_msg"] = result["error"]
                     return result
 
-            # Passthrough check
             if anti_hack_inputs:
                 passed, reason = check_not_passthrough(
                     anti_hack_candidate_outputs[0], anti_hack_inputs[0]
@@ -774,18 +859,25 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                     result["verifier_msg"] = result["error"]
                     return result
         except Exception:
-            pass  # Anti-hack is best-effort, don't fail the whole eval
+            pass  # Anti-hack is best-effort
 
+        # === Step 10: timing — candidate runs via dlsym, baselines via PyTorch ===
         try:
             torch.manual_seed(42)
             bench_inputs = ref_mod.get_inputs()
             if not isinstance(bench_inputs, (list, tuple)):
                 bench_inputs = [bench_inputs]
             bench_inputs = _move_to_cuda(bench_inputs, torch)
+            bench_tensor_inputs = [
+                t.contiguous().float() for t in bench_inputs if isinstance(t, torch.Tensor)
+            ]
+            with torch.no_grad():
+                ref_out_bench = ref_model(*bench_inputs).contiguous().float()
+            bench_out_buf = torch.empty_like(ref_out_bench)
 
             for _ in range(warmup_iters):
                 with torch.no_grad():
-                    ref_model(*_clone_value(bench_inputs))
+                    ref_model(*bench_inputs)
             torch.cuda.synchronize()
 
             eager_times = []
@@ -794,11 +886,10 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                 end_evt = torch.cuda.Event(enable_timing=True)
                 start_evt.record()
                 with torch.no_grad():
-                    ref_model(*_clone_value(bench_inputs))
+                    ref_model(*bench_inputs)
                 end_evt.record()
                 end_evt.synchronize()
                 eager_times.append(start_evt.elapsed_time(end_evt))
-
             eager_ms = float(np.median(eager_times))
             result["baseline_eager_ms"] = eager_ms
 
@@ -807,7 +898,7 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                 compiled_model = torch.compile(ref_model)
                 for _ in range(warmup_iters):
                     with torch.no_grad():
-                        compiled_model(*_clone_value(bench_inputs))
+                        compiled_model(*bench_inputs)
                 torch.cuda.synchronize()
 
                 compile_times = []
@@ -816,18 +907,17 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                     end_evt = torch.cuda.Event(enable_timing=True)
                     start_evt.record()
                     with torch.no_grad():
-                        compiled_model(*_clone_value(bench_inputs))
+                        compiled_model(*bench_inputs)
                     end_evt.record()
                     end_evt.synchronize()
                     compile_times.append(start_evt.elapsed_time(end_evt))
-
                 compile_ms = float(np.median(compile_times))
             except Exception:
                 compile_ms = 0.0
             result["baseline_compile_ms"] = compile_ms
 
             for _ in range(warmup_iters):
-                extension.run_kernel(*_clone_value(bench_inputs))
+                _invoke_candidate(run_kernel, sig_class, bench_tensor_inputs, bench_out_buf)
             torch.cuda.synchronize()
 
             kernel_times = []
@@ -835,7 +925,7 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                 start_evt = torch.cuda.Event(enable_timing=True)
                 end_evt = torch.cuda.Event(enable_timing=True)
                 start_evt.record()
-                extension.run_kernel(*_clone_value(bench_inputs))
+                _invoke_candidate(run_kernel, sig_class, bench_tensor_inputs, bench_out_buf)
                 end_evt.record()
                 end_evt.synchronize()
                 kernel_times.append(start_evt.elapsed_time(end_evt))
@@ -858,7 +948,7 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             if compile_ms > 0 and kernel_ms > 0:
                 result["speedup_vs_dg"] = compile_ms / kernel_ms
 
-            # No-op check: if runtime is suspiciously fast, the kernel skips computation
+            # No-op check: if runtime is suspiciously fast, candidate skipped computation
             try:
                 from openenv_env.anti_hack import check_not_noop
 

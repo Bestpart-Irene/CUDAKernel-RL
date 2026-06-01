@@ -11,6 +11,7 @@ See: https://github.com/hkust-nlp/KernelGYM/blob/main/drkernel/README.md
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,38 @@ FORBIDDEN_SYMBOLS = [
     "torch.compile",
     "torch.nn.functional",
 ]
+
+# Source-level patterns that reject a candidate before it even reaches nvcc.
+# These exist because every PyTorch C++ extension links libtorch and therefore
+# always shows torch::/at::/c10:: symbols in `nm -D` — so post-link symbol
+# scanning is useless on the ops6k path. Source-level rejection is the only
+# mechanism that closes the EXP-015'-A torch::-API delegation channel without
+# breaking the legitimate WCC extern "C" path. Pattern list deliberately
+# matches CUDA-Agent §13 anti-hack stack layer 1 ("no torch headers in the
+# .cu file").
+FORBIDDEN_SOURCE_PATTERNS = [
+    r'#\s*include\s*[<"]torch/',
+    r'#\s*include\s*[<"]ATen/',
+    r'#\s*include\s*[<"]c10/',
+    r'\btorch::',
+    r'\bat::',
+    r'\bc10::',
+]
+
+
+def scan_source_forbidden(source: str) -> str | None:
+    """Return rejection reason if source matches a forbidden pattern, else None.
+
+    Source-level pre-compile check for the unified extern "C" eval contract
+    (EXP-018a). Closes the torch::-API delegation reward-hack channel that
+    invalidated EXP-015'-A. Must run BEFORE nvcc to keep `nm -D` scans
+    meaningful (no libtorch linkage means no false positives).
+    """
+    for pat in FORBIDDEN_SOURCE_PATTERNS:
+        m = re.search(pat, source)
+        if m:
+            return f"forbidden source pattern: {pat!r} matched {m.group(0)!r}"
+    return None
 
 
 def extract_cu_flags(cuda_code: str) -> list[str]:
