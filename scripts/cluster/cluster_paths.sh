@@ -51,7 +51,15 @@ case ":${PATH}:" in
 esac
 case ":${LD_LIBRARY_PATH:-}:" in
     *":${CUDA_HOME}/lib64:"*) ;;
-    *) export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}" ;;
+    *)
+        # Only append ':'$LD_LIBRARY_PATH when non-empty — a trailing ':'
+        # is an empty component, which the linker treats as CWD.
+        if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+            export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+        else
+            export LD_LIBRARY_PATH="${CUDA_HOME}/lib64"
+        fi
+        ;;
 esac
 
 # --- WandB / job naming ---------------------------------------------------

@@ -87,8 +87,15 @@ trap 'rm -f "${ADDRESS_FILE}"; echo "Removed ${ADDRESS_FILE}"' EXIT TERM INT
 echo ""
 echo "=== Starting FastAPI eval service ==="
 echo "URL: http://${EVAL_ADDR}"
-exec python -m uvicorn eval_service.app:app \
+# Run uvicorn as a CHILD process, NOT via exec: exec replaces this shell,
+# so the EXIT/TERM traps (including removal of the published address file)
+# never fire on scancel/walltime and stale addresses mislead later training
+# jobs. Forward TERM to the child from the trap, then wait on it.
+python -m uvicorn eval_service.app:app \
   --host 0.0.0.0 \
   --port "${EVAL_PORT}" \
   --workers 1 \
-  --log-level info
+  --log-level info &
+UVICORN_PID=$!
+trap 'kill -TERM "${UVICORN_PID}" 2>/dev/null || true; wait "${UVICORN_PID}" 2>/dev/null || true; rm -f "${ADDRESS_FILE}"; echo "Removed ${ADDRESS_FILE}"' EXIT TERM INT
+wait "${UVICORN_PID}"

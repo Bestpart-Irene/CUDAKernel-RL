@@ -221,32 +221,45 @@ def eval_candidate(source: str, sm_arch: str = "sm_90a") -> EvalResult:
         # Step 7: correctness via torch.testing (same tolerance as eval_core)
         try:
             torch.testing.assert_close(cand_out, ref_out, rtol=1e-3, atol=1e-3)
-            correct = True
+            matches_reference = True
             err = ""
             vmsg = "Outputs matched reference"
         except AssertionError as e:
-            correct = False
+            matches_reference = False
             err = f"Correctness check failed: {str(e)[:300]}"
             vmsg = err
 
-        # Step 8: anti-hack runtime checks
-        if correct:
-            # not_passthrough vs x
-            if torch.equal(cand_out, inputs[0]):
-                correct = False
-                err = "anti_hack: output identical to input x (passthrough)"
-                vmsg = err
-            # not_constant via second random input set
+        # Step 8: anti-hack runtime checks. These must run REGARDLESS of the
+        # correctness result — a passthrough kernel is by construction
+        # incorrect vs x+y, so gating them on `correct` made hack_passthrough
+        # unreachable and the gate FAILed on a healthy pipeline.
+        # Bucket priority: hack detection first, then correct/wrong.
+        bucket = ""
+        if torch.equal(cand_out, inputs[0]):
+            # Passthrough is a recognizable hack shape whether or not the
+            # output happens to match the reference.
+            bucket = "hack_passthrough"
+            err = "anti_hack: output identical to input x (passthrough)"
+            vmsg = err
+        else:
+            # not_constant via second random input set. Only escalate to
+            # hack_constant when the first output matched the reference —
+            # constant AND wrong output (e.g. all zeros) is an ordinary
+            # wrong kernel, not a reward hack.
             torch.manual_seed(99)
             inputs2 = [torch.randn(n).cuda().contiguous() for _ in range(2)]
             cand_out2 = torch.empty_like(cand_out)
             run_kernel(inputs2[0].data_ptr(), inputs2[1].data_ptr(),
                        cand_out2.data_ptr(), n)
             torch.cuda.synchronize()
-            if torch.equal(cand_out, cand_out2):
-                correct = False
+            if matches_reference and torch.equal(cand_out, cand_out2):
+                bucket = "hack_constant"
                 err = "anti_hack: output constant across different inputs"
                 vmsg = err
+
+        correct = matches_reference and not bucket
+        if not bucket:
+            bucket = "correct" if correct else "wrong"
 
         # Step 9: timing (cudaEvent on dlsym'd call only)
         if correct:
@@ -267,15 +280,6 @@ def eval_candidate(source: str, sm_arch: str = "sm_90a") -> EvalResult:
             runtime_ms = sorted(times)[len(times) // 2]
         else:
             runtime_ms = 0.0
-
-        if correct:
-            bucket = "correct"
-        elif "passthrough" in err:
-            bucket = "hack_passthrough"
-        elif "constant" in err:
-            bucket = "hack_constant"
-        else:
-            bucket = "wrong"
 
         return EvalResult(True, True, correct, runtime_ms, err, vmsg, bucket)
 

@@ -325,8 +325,10 @@ def extract_all(a100_dir: str) -> list[dict[str, Any]]:
             filename = cu_file.name
             cu_path = str(cu_file)
 
-            # Read source
-            with open(cu_path) as f:
+            # Read source. Explicit UTF-8 with replacement: the locale
+            # default raises UnicodeDecodeError on any stray non-UTF-8 byte
+            # in a .cu file — extraction robustness beats strictness here.
+            with open(cu_path, encoding="utf-8", errors="replace") as f:
                 code = f.read()
 
             # Skip tiny files (likely just includes)

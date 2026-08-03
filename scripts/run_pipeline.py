@@ -24,6 +24,13 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+# Anchor defaults to the repo root: cwd-relative defaults break every step
+# when the pipeline is launched outside the repo root — worst of all, the
+# step-0 cache check misses datasets/combined_kernelforge.jsonl and
+# triggers a full dataset rebuild.
+ROOT = Path(__file__).resolve().parents[1]
 
 
 # --- Configuration ---
@@ -34,11 +41,11 @@ EVAL_BACKEND = os.getenv("KERNELFORGE_EVAL_BACKEND", "coreweave")
 MODAL_APP = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 EVAL_URL = os.getenv("KERNELFORGE_EVAL_URL", "")
 
-COMBINED_PATH = os.getenv("KERNELFORGE_COMBINED_PATH", "datasets/combined_kernelforge.jsonl")
+COMBINED_PATH = os.getenv("KERNELFORGE_COMBINED_PATH", str(ROOT / "datasets" / "combined_kernelforge.jsonl"))
 
-STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
-STAGE2_OUTPUT = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
-STAGE3_OUTPUT = os.getenv("KERNELFORGE_STAGE3_OUTPUT", "outputs/kernelforge-stage3")
+STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", str(ROOT / "outputs" / "kernelforge-stage1"))
+STAGE2_OUTPUT = os.getenv("KERNELFORGE_STAGE2_OUTPUT", str(ROOT / "outputs" / "kernelforge-stage2"))
+STAGE3_OUTPUT = os.getenv("KERNELFORGE_STAGE3_OUTPUT", str(ROOT / "outputs" / "kernelforge-stage3"))
 
 
 # --- Pipeline steps ---
@@ -48,7 +55,7 @@ STEPS = [
         "name": "0. Build combined dataset (doubleGraph + Ops-6K)",
         "stage": 0,
         "check": lambda: os.path.exists(COMBINED_PATH),
-        "cmd": [sys.executable, "datasets/build_combined_dataset.py"],
+        "cmd": [sys.executable, str(ROOT / "datasets" / "build_combined_dataset.py")],
     },
     {
         "name": "1. GRPO warm-up (Stage 1)",
@@ -95,7 +102,9 @@ def _run_step(step: dict, dry_run: bool = False) -> bool:
     print(f"{'='*60}")
     start = time.time()
 
-    result = subprocess.run(step["cmd"], cwd=os.getcwd())
+    # Run from the repo root so `-m training.*` module launches resolve
+    # regardless of the caller's cwd.
+    result = subprocess.run(step["cmd"], cwd=str(ROOT))
 
     elapsed = time.time() - start
     if result.returncode == 0:

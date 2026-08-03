@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -20,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from training.cuda_agent_integration import _parse_ops  # noqa: E402
+from training.cuda_agent_integration import _build_cuda_prompt, _parse_ops  # noqa: E402
 
 
 def _task_has_empty_init_inputs(task_code: str) -> bool:
@@ -70,6 +71,42 @@ DENY_OPS = {
 }
 
 
+def _strip_input_generators(task_code: str) -> str:
+    """Return task_code with get_inputs()/get_init_inputs() bodies removed.
+
+    The DENY_OPS list guards the KERNEL COMPUTATION (Model.forward etc.)
+    against nondeterministic ops. Input generation legitimately uses
+    torch.rand/torch.randn in essentially every Ops-6K task, so scanning the
+    whole file rejected 100% of real tasks. Slice those function bodies out
+    (via ast line spans, robust to any def style) before the deny scan.
+    Unparseable code is returned unchanged — it gets rejected downstream by
+    _task_has_empty_init_inputs/has_valid_structure anyway.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(task_code)
+    except SyntaxError:
+        return task_code
+
+    spans = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            node.name in ("get_inputs", "get_init_inputs")
+        ):
+            start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+            spans.append((start, node.end_lineno or start))
+    if not spans:
+        return task_code
+
+    kept = [
+        line
+        for i, line in enumerate(task_code.splitlines(), 1)
+        if not any(start <= i <= end for start, end in spans)
+    ]
+    return "\n".join(kept)
+
+
 def is_stateless_evaluable(task_code: str) -> bool:
     """Return True for tasks that the ops6k extension harness can evaluate."""
     text = task_code.strip()
@@ -77,7 +114,7 @@ def is_stateless_evaluable(task_code: str) -> bool:
         return False
     if any(token in text for token in STATEFUL_TOKENS):
         return False
-    if any(deny in text for deny in DENY_OPS):
+    if any(deny in _strip_input_generators(text) for deny in DENY_OPS):
         return False
     if "class Model" not in text:
         return False
@@ -107,6 +144,21 @@ def has_valid_structure(task_code: str) -> bool:
     return has_model and has_get_inputs
 
 
+def _difficulty_from_ops(ops: list[str]) -> int:
+    """Difficulty heuristic for ops rows.
+
+    Mirrors datasets/build_combined_dataset._difficulty_from_ops (kept in
+    sync by hand — importing the local `datasets` package here would cache
+    it in sys.modules as "datasets" and shadow the HuggingFace `datasets`
+    import that build_task_pool needs).
+    """
+    if len(ops) <= 1:
+        return 1
+    if len(ops) == 2:
+        return 2
+    return 3
+
+
 def build_task_pool(max_samples: int = 6000, seed: int = 42) -> list[dict]:
     """Load Ops-6K and filter for evaluable tasks."""
     # Import HF datasets (using the shadow-safe loader)
@@ -126,7 +178,7 @@ def build_task_pool(max_samples: int = 6000, seed: int = 42) -> list[dict]:
     pool = []
     skipped = {"no_code": 0, "stateful": 0, "bad_structure": 0}
 
-    for idx, row in enumerate(ds):
+    for row in ds:
         code = str(row.get("code", "")).strip()
         if not code:
             skipped["no_code"] += 1
@@ -143,8 +195,25 @@ def build_task_pool(max_samples: int = 6000, seed: int = 42) -> list[dict]:
         ops = _parse_ops(row.get("ops"))
         ops_desc = ", ".join(ops) if ops else "unknown"
 
+        # Same prompt shape as datasets/build_combined_dataset.load_ops6k,
+        # which also delegates to _build_cuda_prompt — every consumer
+        # (KernelForgeEnv.reset, filter_supported_tasks/normalize_task_row,
+        # scripts/run_benchmark.py) keys on row["prompt"].
+        prompt = _build_cuda_prompt(row)
+        if not prompt:
+            skipped["no_code"] += 1
+            continue
+
+        # Stable task id: positional ids over a shuffled view change with
+        # --max-samples/--seed and upstream dataset revisions, breaking
+        # result joins. Ops-6K rows carry no unique id/name field, so hash
+        # the full task source — the code string IS the task's identity.
+        digest = hashlib.sha1(code.encode("utf-8")).hexdigest()[:12]
+
         pool.append({
-            "task_id": f"ops6k_{idx:05d}",
+            "task_id": f"ops6k_{digest}",
+            "prompt": prompt,
+            "difficulty": _difficulty_from_ops(ops),
             "task_code": code,
             "ops": ops,
             "ops_description": ops_desc,

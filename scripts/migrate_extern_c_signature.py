@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -114,8 +116,23 @@ def main() -> int:
         print("\n[dry-run] not writing")
         return 0
 
+    print("\n" + "!" * 72)
+    print("WARNING: this migration (re-)introduces the extern_c_signature column.")
+    print("         EXP-018c normalized the dataset schema WITHOUT that column;")
+    print("         re-running this script post-EXP-018c adds it back. Make sure")
+    print("         that is what you want before using the rewritten dataset.")
+    print("!" * 72)
+
+    # Back up the original, then write atomically (tmp + os.replace) so a
+    # crash mid-write can never leave a truncated dataset behind.
+    backup_path = args.dataset.with_suffix(args.dataset.suffix + ".bak")
+    shutil.copy2(args.dataset, backup_path)
+    print(f"Backup of original written to {backup_path}")
+
     out_lines = [json.dumps(row, ensure_ascii=False) for row in rows]
-    args.dataset.write_text("\n".join(out_lines) + "\n")
+    tmp_path = args.dataset.with_suffix(args.dataset.suffix + ".tmp")
+    tmp_path.write_text("\n".join(out_lines) + "\n")
+    os.replace(tmp_path, args.dataset)
     print(f"\nWrote {len(rows)} rows back to {args.dataset}")
     return 0
 

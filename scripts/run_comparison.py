@@ -74,8 +74,14 @@ def _load_models_config(config_path: str, model_filter: str | None = None) -> tu
     with open(config_path, encoding="utf-8") as f:
         config = json.load(f)
 
-    models = config.get("models", config if isinstance(config, list) else [])
-    settings = {k: v for k, v in config.items() if k != "models"} if isinstance(config, dict) else {}
+    # A bare-list JSON (just the model entries) is valid too — branch on the
+    # type BEFORE calling .get, which only exists on dicts.
+    if isinstance(config, list):
+        models = config
+        settings = {}
+    else:
+        models = config.get("models", [])
+        settings = {k: v for k, v in config.items() if k != "models"}
 
     # Filter by enabled flag
     models = [m for m in models if m.get("enabled", True)]

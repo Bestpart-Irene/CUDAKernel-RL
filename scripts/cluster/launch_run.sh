@@ -22,6 +22,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 source "${REPO_ROOT}/scripts/cluster/cluster_paths.sh"
 
+# The kf_*.slurm scripts declare #SBATCH --output=logs/... relative to the
+# submit dir; slurm needs that directory to exist at job START or the job
+# dies immediately on a fresh tree. Create it before any sbatch.
+mkdir -p "${REPO_ROOT}/logs" "${KF_LOGS}"
+
 ADDRESS_FILE="${KF_SCRATCH_ROOT}/eval_server.address"
 
 # Clear any stale address from a prior crashed run.
@@ -42,6 +47,8 @@ for i in $(seq 1 60); do
 done
 if [ ! -s "${ADDRESS_FILE}" ]; then
   echo "Eval server did not publish an address. Check logs/kf_eval_server_${EVAL_JOBID}.out" >&2
+  echo "Cancelling eval server job ${EVAL_JOBID} so it does not burn allocation." >&2
+  scancel "${EVAL_JOBID}" || true
   exit 2
 fi
 

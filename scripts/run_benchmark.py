@@ -5,7 +5,7 @@ Runs a model against a set of tasks, evaluates each via the eval backend,
 and reports KernelBench-compatible metrics (fast_0, fast_1.05, fast_compile).
 
 Usage:
-    # Compute baselines only (no model needed)
+    # List task metadata only (no model, no evaluation, no baseline timing)
     python scripts/run_benchmark.py --baselines-only
 
     # Run benchmark with a model
@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -26,6 +27,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+def stable_task_id(task: dict, fallback_text: str = "") -> str:
+    """Join key for compare_results.py.
+
+    Prefer the pool's task_id; otherwise hash the prompt. Positional ids
+    (task_{i}) are NOT stable across pool filters/ordering, which made
+    before/after joins meaningless.
+    """
+    tid = task.get("task_id")
+    if tid:
+        return str(tid)
+    text = str(task.get("prompt") or fallback_text)
+    return "task_" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
 def compute_fast_p(results: list[dict], p: float = 1.0) -> float:
@@ -74,6 +89,9 @@ def run_benchmark(
     """Run the benchmark and output results.
 
     Args:
+        baselines_only: List task metadata only (task_id/backend/ops). No
+            model is loaded, nothing is evaluated, and no baseline timings
+            are computed — despite the historical flag name.
         benchmark: Filter tasks by evaluation_backend. Options:
             "all" — run all evaluable tasks (default)
             "ops6k" — CUDA Agent Ops-6K tasks only
@@ -102,7 +120,7 @@ def run_benchmark(
     results = []
     for i, task in enumerate(tasks):
         task = normalize_task_row(task)
-        tid = task.get("task_id", f"task_{i}")
+        tid = stable_task_id(task, fallback_text=str(task.get("task_code", i)))
         backend = task.get("evaluation_backend", "unknown")
         ops = task.get("ops", [])
 
@@ -114,6 +132,7 @@ def run_benchmark(
                 "task_id": tid,
                 "backend": backend,
                 "ops": ops,
+                "compiles": None,
                 "correct": None,
                 "speedup_vs_eager": None,
                 "speedup_vs_compile": None,
@@ -127,6 +146,7 @@ def run_benchmark(
                 "task_id": tid,
                 "backend": backend,
                 "ops": ops,
+                "compiles": False,
                 "correct": False,
                 "speedup_vs_eager": 0.0,
                 "speedup_vs_compile": 0.0,
@@ -143,6 +163,7 @@ def run_benchmark(
                 "task_id": tid,
                 "backend": backend,
                 "ops": ops,
+                "compiles": False,
                 "correct": False,
                 "speedup_vs_eager": 0.0,
                 "speedup_vs_compile": 0.0,
@@ -156,18 +177,20 @@ def run_benchmark(
             from training.task_support import evaluate_code_remote
 
             eval_result = evaluate_code_remote(cuda_code, task)
+            compiles = bool(eval_result.get("compiles"))
             correct = bool(eval_result.get("correct"))
             su_eager = float(eval_result.get("speedup_vs_orig", 0) or 0)
             su_compile = float(eval_result.get("speedup_vs_dg", 0) or 0)
             reward = float(eval_result.get("reward", -1))
 
-            print(f"  correct={correct} su_eager={su_eager:.2f}x "
+            print(f"  compiles={compiles} correct={correct} su_eager={su_eager:.2f}x "
                   f"su_compile={su_compile:.2f}x reward={reward}")
 
             results.append({
                 "task_id": tid,
                 "backend": backend,
                 "ops": ops,
+                "compiles": compiles,
                 "correct": correct,
                 "speedup_vs_eager": su_eager,
                 "speedup_vs_compile": su_compile,
@@ -183,6 +206,7 @@ def run_benchmark(
                 "task_id": tid,
                 "backend": backend,
                 "ops": ops,
+                "compiles": False,
                 "correct": False,
                 "speedup_vs_eager": 0.0,
                 "speedup_vs_compile": 0.0,
@@ -202,7 +226,11 @@ def run_benchmark(
         "geomean_vs_eager": compute_geomean_speedup(evaluated, "speedup_vs_eager"),
         "geomean_vs_compile": compute_geomean_speedup(evaluated, "speedup_vs_compile"),
         "compile_rate": (
-            sum(1 for r in evaluated if r.get("correct") is not None) / len(evaluated)
+            # Fraction of evaluated tasks whose kernel actually compiled —
+            # captured from the eval backend's `compiles` bool. (The old
+            # `correct is not None` check was true for every evaluated row,
+            # pinning compile_rate at 1.0.)
+            sum(1 for r in evaluated if r.get("compiles")) / len(evaluated)
             if evaluated else 0.0
         ),
         "correctness_rate": compute_fast_p(evaluated, p=0.0),
@@ -313,7 +341,9 @@ def main():
     parser.add_argument("--pool", type=str, default=None, help="Task pool JSONL path")
     parser.add_argument("--model", type=str, default=None, help="Model name/path")
     parser.add_argument("--output", type=str, default="results/benchmark.json")
-    parser.add_argument("--baselines-only", action="store_true")
+    parser.add_argument("--baselines-only", action="store_true",
+                        help="List task metadata only (task_id/backend/ops); "
+                             "no model, no evaluation, no baseline timing")
     parser.add_argument("--max-tasks", type=int, default=None)
     parser.add_argument("--quant-bits", type=int, default=0, choices=[0, 4, 8],
                         help="Quantization bits: 0=bf16, 4=NF4, 8=INT8 (recommended)")

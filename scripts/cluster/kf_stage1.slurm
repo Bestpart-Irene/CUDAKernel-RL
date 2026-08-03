@@ -120,13 +120,20 @@ else
   export KERNELFORGE_EVAL_URL="http://${EVAL_ADDR}"
 
   echo "Waiting for eval server health at ${KERNELFORGE_EVAL_URL}/health..."
+  HEALTHY=0
   for i in $(seq 1 60); do
     if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then
       echo "Eval server healthy."
+      HEALTHY=1
       break
     fi
     sleep 10
   done
+  if [ "${HEALTHY}" != "1" ]; then
+    echo "FATAL: eval server at ${KERNELFORGE_EVAL_URL} never became healthy after 10 min." >&2
+    echo "  Refusing to start training against a dead eval URL." >&2
+    exit 3
+  fi
 fi
 
 export WANDB_PROJECT="${KF_WANDB_PROJECT:-kernelforge}"

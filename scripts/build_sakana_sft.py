@@ -52,6 +52,18 @@ _PYBIND_DEF_RE = re.compile(
 )
 
 
+def _rename_freestanding(code: str, name: str) -> str:
+    """Whole-word rename of `name` → `run_kernel`, freestanding uses only.
+
+    Qualified/member uses must stay untouched: a bare `\\b{name}\\b` sub
+    mangles `std::forward<T>(...)` (and `obj.forward` / `ptr->forward`)
+    whenever the entrypoint is called `forward`. Negative lookbehinds for
+    `::`, `.` and `->` restrict the rename to freestanding identifiers —
+    declarations, calls, `&name` references, and the pybind export string.
+    """
+    return re.sub(rf"(?<!::)(?<!\.)(?<!->)\b{re.escape(name)}\b", "run_kernel", code)
+
+
 def rename_sakana_entrypoint_to_run_kernel(code: str) -> str:
     """Rewrite Sakana's pybind entry point → `run_kernel`.
 
@@ -61,15 +73,15 @@ def rename_sakana_entrypoint_to_run_kernel(code: str) -> str:
     helper functions. Always also normalizes the older `kernel_function`
     name for backwards compatibility with earlier Sakana exports.
     """
-    code = re.sub(r"\bkernel_function\b", "run_kernel", code)
+    code = _rename_freestanding(code, "kernel_function")
     match = _PYBIND_DEF_RE.search(code)
     if not match:
         # No pybind def found — fall back to whole-word forward (legacy).
-        return re.sub(r"\bforward\b", "run_kernel", code)
+        return _rename_freestanding(code, "forward")
     name = match.group("name")
     if name == "run_kernel":
         return code
-    return re.sub(rf"\b{re.escape(name)}\b", "run_kernel", code)
+    return _rename_freestanding(code, name)
 
 
 def build_messages(row: dict, target_gpu: str = "A100", target_arch: str = "sm_80") -> dict:

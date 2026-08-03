@@ -40,7 +40,9 @@ Run: `python scripts/build_wcc_sft_replacements.py`
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -585,6 +587,20 @@ def main() -> None:
         assert "DEVICE KERNEL -- runs on GPU" in v, f"simple v{i} missing device annotation"
         assert "===== HOST WRAPPER =====" in v, f"simple v{i} missing host annotation"
 
+    # Idempotency guard: the append step is NOT re-runnable (a second run
+    # would push the corpus past 196 rows and then crash on the count
+    # assert — after already clobbering the file). Detect the already-
+    # applied state up front and exit cleanly.
+    existing_assistant = {r["messages"][2]["content"] for r in rows}
+    expected_simple = {"```cuda\n" + v + "```" for v in annotated_simple}
+    if expected_simple <= existing_assistant:
+        print(
+            f"Already applied: all 4 simple variants present "
+            f"({len(rows)} rows). Nothing to do."
+        )
+        _self_check(rows)
+        return
+
     # Replace rows 76-79 with the production kernel (already there from EXP-011
     # but re-write to be sure / idempotent).
     for idx in WCC_INDICES_REPLACE:
@@ -620,14 +636,25 @@ def main() -> None:
         new_rows.append(new_row)
     rows.extend(new_rows)
 
-    SFT_PATH.write_text(
+    # Validate the FULL new row set before touching the file — an assert
+    # here must abort with the original dataset intact on disk.
+    print(f"Total rows after rewrite: {len(rows)} (expected 196)")
+    _self_check(rows)
+
+    # Write atomically: back up the original, dump to a tmp file in the
+    # same directory, then os.replace so readers never see a partial file.
+    backup_path = SFT_PATH.with_suffix(SFT_PATH.suffix + ".bak")
+    shutil.copy2(SFT_PATH, backup_path)
+    print(f"Backup of original written to {backup_path}")
+    tmp_path = SFT_PATH.with_suffix(SFT_PATH.suffix + ".tmp")
+    tmp_path.write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n"
     )
-    print(f"Total rows after rewrite: {len(rows)} (expected 196)")
+    os.replace(tmp_path, SFT_PATH)
+    print(f"Wrote {len(rows)} rows to {SFT_PATH}")
 
-    # Self-check.
-    with SFT_PATH.open() as fh:
-        check_rows = [json.loads(l) for l in fh]
+
+def _self_check(check_rows: list[dict]) -> None:
     assert len(check_rows) == 196
 
     n_prod = 0

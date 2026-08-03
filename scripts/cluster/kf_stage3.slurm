@@ -18,6 +18,10 @@ set -euo pipefail
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "${REPO_ROOT}"
+# Stage default must be set BEFORE sourcing cluster_paths.sh, whose own
+# ":-local" fallback would otherwise fill the var and swallow this default.
+# sbatch --export=ALL,KERNELFORGE_EVAL_BACKEND=... overrides still win.
+export KERNELFORGE_EVAL_BACKEND="${KERNELFORGE_EVAL_BACKEND:-coreweave}"
 source "${REPO_ROOT}/scripts/cluster/cluster_paths.sh"
 mkdir -p "${REPO_ROOT}/logs"
 
@@ -30,7 +34,7 @@ mkdir -p "${KERNELFORGE_STAGE1_OUTPUT}" "${KERNELFORGE_STAGE2_OUTPUT}" "${KERNEL
 
 export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
 export KERNELFORGE_MAX_TURNS="${KERNELFORGE_MAX_TURNS:-3}"
-export KERNELFORGE_EVAL_BACKEND=coreweave
+# KERNELFORGE_EVAL_BACKEND default is set above, before cluster_paths.sh.
 # Explicit re-export so sbatch --export=ALL,VAR=val values reach Python's
 # os.getenv. Every KERNELFORGE_* knob the trainer reads must be listed.
 export KERNELFORGE_STAGE3_NUM_GENERATIONS="${KERNELFORGE_STAGE3_NUM_GENERATIONS:-2}"
@@ -54,10 +58,20 @@ EVAL_ADDR="$(cat "${ADDRESS_FILE}")"
 export KERNELFORGE_EVAL_URL="http://${EVAL_ADDR}"
 
 echo "Waiting for eval server health..."
+HEALTHY=0
 for i in $(seq 1 60); do
-  if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then break; fi
+  if curl -sS -m 5 "${KERNELFORGE_EVAL_URL}/health" | grep -q '"ok"'; then
+    echo "Eval server healthy."
+    HEALTHY=1
+    break
+  fi
   sleep 10
 done
+if [ "${HEALTHY}" != "1" ]; then
+  echo "FATAL: eval server at ${KERNELFORGE_EVAL_URL} never became healthy after 10 min." >&2
+  echo "  Refusing to start training against a dead eval URL." >&2
+  exit 3
+fi
 
 export WANDB_PROJECT="${KF_WANDB_PROJECT:-kernelforge}"
 export WANDB_NAME="stage3-${SLURM_JOB_ID:-local}"

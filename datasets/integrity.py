@@ -7,6 +7,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
+
+# Anchor default paths to the repo root so the checks work (and report on
+# the right files) no matter what cwd the caller runs from.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def hash_file(path: str) -> str | None:
@@ -56,7 +61,7 @@ def verify_jsonl(path: str, required_keys: list[str] | None = None) -> dict:
     }
 
 
-def verify_combined_dataset(path: str = "datasets/combined_kernelforge.jsonl") -> dict:
+def verify_combined_dataset(path: str = str(_REPO_ROOT / "datasets" / "combined_kernelforge.jsonl")) -> dict:
     """Validate the combined training dataset."""
     result = verify_jsonl(path, required_keys=["prompt", "ops", "difficulty", "data_source"])
     if result["valid"] and result["line_count"] > 0:
@@ -78,14 +83,14 @@ def verify_combined_dataset(path: str = "datasets/combined_kernelforge.jsonl") -
     return result
 
 
-def verify_manifest(path: str = "docs/research/doublegraph/doublegraph_a100_manifest.jsonl") -> dict:
+def verify_manifest(path: str = str(_REPO_ROOT / "docs" / "research" / "doublegraph" / "doublegraph_a100_manifest.jsonl")) -> dict:
     """Validate the doubleGraph A100 manifest."""
     result = verify_jsonl(path, required_keys=["kernel_id", "category", "algorithm_name", "variant"])
     result["sha256"] = hash_file(path)
     return result
 
 
-def verify_sft_dataset(path: str = "datasets/doublegraph_sft.jsonl") -> dict:
+def verify_sft_dataset(path: str = str(_REPO_ROOT / "datasets" / "doublegraph_sft.jsonl")) -> dict:
     """Validate the SFT dataset."""
     result = verify_jsonl(path, required_keys=["messages"])
     result["sha256"] = hash_file(path)

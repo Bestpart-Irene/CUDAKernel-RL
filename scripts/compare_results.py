@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -17,6 +18,31 @@ def load_results(path: str) -> dict:
     """Load benchmark results JSON."""
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _result_key(record: dict) -> str:
+    """Join key for a result record — mirrors run_benchmark.stable_task_id.
+
+    Prefer the record's task_id; fall back to a hash of the prompt so the
+    key never depends on task position.
+    """
+    tid = record.get("task_id")
+    if tid:
+        return str(tid)
+    text = str(record.get("prompt") or "")
+    return "task_" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _index_results(results: list[dict], label: str) -> dict[str, dict]:
+    """Index records by join key, warning on duplicates (last one wins)."""
+    indexed: dict[str, dict] = {}
+    for record in results:
+        key = _result_key(record)
+        if key in indexed:
+            print(f"WARNING: duplicate task_id {key!r} in {label} results — "
+                  f"keeping the last occurrence")
+        indexed[key] = record
+    return indexed
 
 
 def compare(before: dict, after: dict) -> dict:
@@ -42,8 +68,8 @@ def compare(before: dict, after: dict) -> dict:
         }
 
     # Per-task comparison
-    before_tasks = {r["task_id"]: r for r in before.get("results", [])}
-    after_tasks = {r["task_id"]: r for r in after.get("results", [])}
+    before_tasks = _index_results(before.get("results", []), "before")
+    after_tasks = _index_results(after.get("results", []), "after")
     all_task_ids = sorted(set(before_tasks) | set(after_tasks))
 
     task_diffs = []
