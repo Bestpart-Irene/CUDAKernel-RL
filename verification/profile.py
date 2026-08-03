@@ -208,8 +208,8 @@ class H100Profiler:
     def _verify_correctness(self, edges: List[tuple], n_vertices: int) -> Dict[str, Any]:
         """Verify kernel correctness using PAC verification."""
         try:
-            from pac_verify import verify_wcc, run_kernel_verification
-            
+            from verification.pac_verify import verify_wcc
+
             kernel_labels = run_kernel_verification(self.kernel_path, edges, n_vertices)
             passed, message = verify_wcc(kernel_labels, edges, n_vertices)
             
@@ -290,7 +290,8 @@ class H100Profiler:
         
         with tempfile.NamedTemporaryFile(suffix='.nsight-profiler', delete=False) as tmp_file:
             output_path = tmp_file.name
-        
+
+        prog_path = None
         try:
             # Create a simple test program that calls the kernel
             test_program = self._generate_ncu_test_program(edges, n_vertices)
@@ -338,8 +339,11 @@ class H100Profiler:
         except Exception as e:
             return {"error": f"NCU profiling exception: {str(e)}"}
         finally:
-            # Cleanup temporary files
-            for path in [output_path, output_path + ".json", prog_path, prog_path.replace('.cpp', '')]:
+            # Cleanup temporary files (prog_path may be unset if generation failed)
+            cleanup_paths = [output_path, output_path + ".json"]
+            if prog_path:
+                cleanup_paths += [prog_path, prog_path.replace('.cpp', '')]
+            for path in cleanup_paths:
                 if os.path.exists(path):
                     os.unlink(path)
     
@@ -419,7 +423,10 @@ int main() {{
             return speedups
         
         kernel_time = performance.get("median_ms", 0)
-        
+        if not kernel_time or kernel_time <= 0:
+            # Benchmark error path returns median_ms=0.0 — no meaningful speedup.
+            return speedups
+
         # Speedup vs cuGraph
         if graph_size in self.baseline_results.get("cuGraph", {}):
             cugraph_time = self.baseline_results["cuGraph"][graph_size].get("median_ms", 0)

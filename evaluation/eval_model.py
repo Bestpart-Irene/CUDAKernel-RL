@@ -64,32 +64,42 @@ def evaluate_checkpoint(
             text = output[0]["generated_text"]
             if text.startswith(prompt):
                 text = text[len(prompt) :]
-
             code = extract_cuda_code(text)
-            if not code:
-                raise RuntimeError("Model response did not contain CUDA/C++ code")
-
-            result = evaluate_code_remote(code, task)
-            reward = float(result.get("reward", -1.0))
-
-            if result.get("compiles"):
-                results["compiles"] += 1
-            if result.get("correct"):
-                results["correct"] += 1
-            results["rewards"].append(reward)
-            if result.get("correct") and result.get("speedup_vs_orig", 0) > 0:
-                results["speedups"].append(float(result["speedup_vs_orig"]))
-
         except Exception as exc:
-            print(f"  Problem {idx + 1} failed: {exc}")
+            print(f"  Problem {idx + 1} generation failed: {exc}")
             results["rewards"].append(-1.0)
+            continue
+
+        if not code:
+            print(f"  Problem {idx + 1}: model response did not contain CUDA/C++ code")
+            results["rewards"].append(-1.0)
+            continue
+
+        try:
+            result = evaluate_code_remote(code, task)
+        except Exception as exc:
+            # Backend/network faults are not model failures: skip instead of
+            # poisoning avg_reward with -1s the model didn't earn.
+            print(f"  Problem {idx + 1} skipped (eval backend failure): {exc}")
+            results["skipped"] += 1
+            continue
+
+        reward = float(result.get("reward", -1.0))
+        if result.get("compiles"):
+            results["compiles"] += 1
+        if result.get("correct"):
+            results["correct"] += 1
+        results["rewards"].append(reward)
+        if result.get("correct") and result.get("speedup_vs_orig", 0) > 0:
+            results["speedups"].append(float(result["speedup_vs_orig"]))
 
         if (idx + 1) % 10 == 0:
             print(f"  Evaluated {idx + 1}/{len(tasks)}")
 
-    n = results["num_problems"]
-    results["compile_rate"] = results["compiles"] / n if n > 0 else 0
-    results["correct_rate"] = results["correct"] / n if n > 0 else 0
+    evaluated = results["num_problems"] - results["skipped"]
+    results["evaluated"] = evaluated
+    results["compile_rate"] = results["compiles"] / evaluated if evaluated > 0 else 0
+    results["correct_rate"] = results["correct"] / evaluated if evaluated > 0 else 0
     results["avg_reward"] = statistics.mean(results["rewards"]) if results["rewards"] else 0
     results["median_speedup"] = (
         statistics.median(results["speedups"]) if results["speedups"] else 0
@@ -105,6 +115,14 @@ def _load_eval_tasks(num_problems: int) -> list[dict]:
             rows = [json.loads(line) for line in f if line.strip()]
         supported = filter_supported_tasks(rows)
         if supported:
+            # KNOWN CONTAMINATION: training (dataset_loader) uses the same
+            # filtered rows with no tail exclusion, so this "held-out" slice
+            # overlaps the training set. A real holdout split is pending a
+            # comparability decision; until then, flag it loudly.
+            print(
+                "WARNING: eval tasks are drawn from the training dataset "
+                "(no holdout split) — metrics are train-contaminated."
+            )
             return supported[-num_problems:]
 
     print(
@@ -137,6 +155,7 @@ def evaluate_multi_seed(
     for seed in range(num_seeds):
         for temp in temperatures:
             print(f"\n--- Seed {seed}, temp {temp} ---")
+            _seed_everything(seed)
             result = evaluate_checkpoint(
                 checkpoint_path,
                 num_problems=num_problems,
@@ -161,15 +180,48 @@ def evaluate_multi_seed(
     }
 
 
+def _seed_everything(seed: int) -> None:
+    """Best-effort deterministic seeding across every RNG the eval touches."""
+    import random
+
+    random.seed(seed)
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+    try:
+        import torch
+
+        torch.manual_seed(seed)
+    except Exception:
+        pass
+    try:
+        from transformers import set_seed
+
+        set_seed(seed)
+    except Exception:
+        pass
+
+
+# Two-tailed 95% t critical values indexed by degrees of freedom (n - 1).
+_T_95 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571,
+    6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+}
+
+
 def _ci_95(values: list[float]) -> tuple[float, float]:
-    """95% CI using a simple t-value approximation."""
+    """95% CI using t critical values matched to the actual df."""
     n = len(values)
     if n < 2:
         mean = values[0] if values else 0.0
         return (mean, mean)
     mean = statistics.mean(values)
     se = statistics.stdev(values) / (n ** 0.5)
-    t_val = 2.776 if n <= 5 else 2.228 if n <= 10 else 1.96
+    df = n - 1
+    t_val = _T_95.get(df, 2.09 if df <= 30 else 1.96)
     return (mean - t_val * se, mean + t_val * se)
 
 

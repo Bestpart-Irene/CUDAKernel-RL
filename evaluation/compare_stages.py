@@ -18,6 +18,20 @@ STAGES = [
 ]
 
 
+def _looks_like_hub_id(path: str) -> bool:
+    """HF hub ids are "org/name": exactly one slash, no local-path prefixes."""
+    if path.startswith(("outputs/", "./", "../", "/", "~")):
+        return False
+    return path.count("/") == 1
+
+
+def _should_skip(checkpoint_path: str) -> bool:
+    """Skip local checkpoint dirs that don't exist; never skip hub ids."""
+    if os.path.exists(checkpoint_path):
+        return False
+    return not _looks_like_hub_id(checkpoint_path)
+
+
 def compare_all_stages(num_problems: int = 50) -> list[dict]:
     """Evaluate all stages and print comparison table."""
     print("=" * 70)
@@ -26,7 +40,7 @@ def compare_all_stages(num_problems: int = 50) -> list[dict]:
 
     results = []
     for stage_name, checkpoint_path in STAGES:
-        if not os.path.exists(checkpoint_path) and "/" not in checkpoint_path:
+        if _should_skip(checkpoint_path):
             print(f"\n--- {stage_name}: SKIPPED (checkpoint not found: {checkpoint_path}) ---")
             results.append({"stage": stage_name, "path": checkpoint_path, "skipped": True})
             continue
@@ -71,7 +85,7 @@ def compare_all_stages(num_problems: int = 50) -> list[dict]:
         base = valid[0]
         final = valid[-1]
         delta = final["avg_reward"] - base["avg_reward"]
-        print(f"\nReward delta (base → final): {delta:+.2f}")
+        print(f"\nReward delta ({base['stage']} → {final['stage']}): {delta:+.2f}")
         print(f"Pipeline {'IMPROVED' if delta > 0 else 'DID NOT IMPROVE'} model quality.")
 
     return results

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -92,8 +93,10 @@ def compile_cuda(
         stdout = exc.stdout or ""
         stderr = (exc.stderr or "") or f"nvcc timed out after {timeout}s"
 
-    if output_path and src_path.exists():
-        os.unlink(src_path)
+    if output_path:
+        # The artifact lives at resolved_output; the temp workdir only held
+        # the source and must not leak (one dir per compile call otherwise).
+        shutil.rmtree(workdir, ignore_errors=True)
 
     return CompileResult(
         success=returncode == 0 and resolved_output.exists(),
