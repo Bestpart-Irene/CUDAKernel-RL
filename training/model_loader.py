@@ -137,10 +137,20 @@ def _load_primary(model_id: str | None = None, quant_bits: int = 0):
         last_error = None
         candidates: list[str] = []
     else:
-        from unsloth import FastLanguageModel, PatchFastRL
-        # No unsloth-alias retry: Unsloth lowercases the repo internally, so a retry pulls a second ~60 GB copy. Set KERNELFORGE_MODEL to pick the mirror explicitly.
-        candidates = [effective_model]
-        last_error = None
+        try:
+            from unsloth import FastLanguageModel, PatchFastRL
+            # No unsloth-alias retry: Unsloth lowercases the repo internally, so a retry pulls a second ~60 GB copy. Set KERNELFORGE_MODEL to pick the mirror explicitly.
+            candidates = [effective_model]
+            last_error = None
+        except Exception as exc:
+            # A failing unsloth import must not kill the run — fall through to
+            # the Transformers + PEFT loader below (empty candidates list).
+            print(
+                f"Unsloth import failed ({type(exc).__name__}: {str(exc)[:300]}); "
+                "falling back to Transformers + PEFT."
+            )
+            candidates = []
+            last_error = exc
     for candidate in candidates:
         print(f"Loading primary model: {candidate} ({quant_label})")
         try:

@@ -14,8 +14,20 @@ signal), MARS degenerates to standard trajectory-level GRPO (see ALPHXIV analysi
 """
 from __future__ import annotations
 
+import warnings
+
 import torch
 from trl import GRPOTrainer, GRPOConfig
+
+
+def trloo_hook_available() -> bool:
+    """True when the installed TRL's GRPOTrainer exposes `_compute_advantages`.
+
+    TRL 0.29 computes advantages inline in grpo_trainer.py — the hook does not
+    exist there, so the override below is never called and the TRLOO
+    correction silently does nothing (2026-08-03 audit).
+    """
+    return hasattr(GRPOTrainer, "_compute_advantages")
 
 
 class TRLOOGRPOTrainer(GRPOTrainer):
@@ -33,6 +45,20 @@ class TRLOOGRPOTrainer(GRPOTrainer):
         # extra G/(G-1). Only enable when the loss is vanilla "grpo".
         loss_type = getattr(self.args, "loss_type", "grpo")
         self._trloo_enabled = loss_type == "grpo"
+        self._trloo_hook_available = trloo_hook_available()
+        self._trloo_active = self._trloo_hook_available and self._trloo_enabled
+        if not self._trloo_hook_available:
+            msg = (
+                "TRLOOGRPOTrainer: base GRPOTrainer has NO `_compute_advantages` "
+                "hook in this TRL version (0.29 computes advantages inline in "
+                "grpo_trainer.py) — the TRLOO N/(N-1) correction is INACTIVE and "
+                "training runs with vanilla TRL advantages. Note also the "
+                'internal gate only enables TRLOO for loss_type=="grpo", while '
+                f'TRL 0.29 defaults to loss_type="dapo" (this run: '
+                f"loss_type={loss_type!r})."
+            )
+            print(f"WARNING: {msg}", flush=True)
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
     def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """Compute advantages with TRLOO N/(N-1) correction.
@@ -43,9 +69,19 @@ class TRLOOGRPOTrainer(GRPOTrainer):
         This includes sample i in its own baseline, causing (1-1/N) gradient shrinkage.
         We apply the correction after the base computation, but ONLY for
         loss_type="grpo" — DAPO is already unbiased.
+
+        Only reachable on TRL versions whose GRPOTrainer actually exposes this
+        hook — TRL 0.29 does not (see trloo_hook_available()).
         """
+        parent_compute = getattr(super(), "_compute_advantages", None)
+        if parent_compute is None:
+            raise RuntimeError(
+                "TRLOOGRPOTrainer._compute_advantages was called, but the base "
+                "GRPOTrainer has no such hook in this TRL version — there is no "
+                "vanilla-advantage computation to correct here."
+            )
         # Let parent compute vanilla GRPO advantages
-        advantages = super()._compute_advantages(rewards)
+        advantages = parent_compute(rewards)
 
         if not self._trloo_enabled:
             return advantages

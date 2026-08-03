@@ -27,6 +27,7 @@ if __package__ in {None, ""}:
 
 from trl import GRPOConfig
 
+from training.checkpoint_utils import find_resumable_checkpoint
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
 from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.model_loader import load_model_and_tokenizer
@@ -220,22 +221,17 @@ def main():
         train_dataset=dataset,
     )
 
-    # Auto-resume from latest checkpoint in OUTPUT_DIR (HF Trainer does NOT do
-    # this by default — requires resume_from_checkpoint=True). Mirrors the
-    # stage2_rft.py fix from commit 5b59d2e.
-    resume = False
-    if os.path.isdir(OUTPUT_DIR):
-        ckpts = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
-        if ckpts:
-            resume = True
-            print(
-                f"Stage 1: auto-resuming from latest checkpoint in {OUTPUT_DIR} "
-                f"(found {sorted(ckpts)})"
-            )
-    if not resume:
-        print(f"Stage 1: no existing checkpoint in {OUTPUT_DIR}; starting fresh.")
+    # Auto-resume from the newest VALID checkpoint in OUTPUT_DIR (HF Trainer
+    # does NOT do this by default — requires resume_from_checkpoint). Passing
+    # the specific path (not True) skips half-written checkpoints a walltime
+    # kill left behind. Mirrors the stage2_rft.py fix from commit 5b59d2e.
+    resume_ckpt = find_resumable_checkpoint(OUTPUT_DIR)
+    if resume_ckpt:
+        print(f"Stage 1: auto-resuming from checkpoint {resume_ckpt}")
+    else:
+        print(f"Stage 1: no valid checkpoint in {OUTPUT_DIR}; starting fresh.")
     print("Starting Stage 1 training...")
-    trainer.train(resume_from_checkpoint=resume)
+    trainer.train(resume_from_checkpoint=resume_ckpt if resume_ckpt else None)
 
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)

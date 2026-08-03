@@ -41,6 +41,9 @@ class TrajectoryCollector:
         self.trajectories: list[dict[str, Any]] = []
         self._generator = None
         self._task_pool: list[dict[str, Any]] | None = None
+        self._generation_attempts = 0
+        self._generation_fallbacks = 0
+        self._generation_failure_logged = False
 
     def collect_trajectories(self, num_trajectories: int = 100) -> list[dict[str, Any]]:
         """Collect trajectories by sampling supported tasks."""
@@ -61,6 +64,13 @@ class TrajectoryCollector:
             if (idx + 1) % 10 == 0:
                 print(f"Collected {len(self.trajectories)} trajectories so far...")
 
+        if self._generation_attempts and self._generation_fallbacks == self._generation_attempts:
+            raise RuntimeError(
+                f"All {self._generation_attempts} generation attempts fell back to "
+                f"_fallback_kernel_template() — the model at {self.model_path} never "
+                "produced output. Collecting N copies of a fixed template is never a "
+                "valid RFT dataset; fix the checkpoint/model load and rerun."
+            )
         return self.trajectories
 
     def _get_task_pool(self) -> list[dict[str, Any]]:
@@ -113,17 +123,16 @@ class TrajectoryCollector:
         if self._generator is not None:
             return self._generator
 
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+        from transformers import pipeline
 
-        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        model = AutoModelForCausalLM.from_pretrained(
-            self.model_path,
-            trust_remote_code=True,
-            torch_dtype=dtype,
-            device_map="auto" if torch.cuda.is_available() else None,
-        )
-        tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+        # Load via the shared loader: it detects PEFT adapter-only dirs
+        # (adapter_config.json, no config.json — what stage1 saves) and applies
+        # the adapter on top of the base model. A bare
+        # AutoModelForCausalLM.from_pretrained raised on those dirs, and the
+        # blanket fallback then substituted the template for EVERY trajectory.
+        from training.model_loader import load_model_and_tokenizer
+
+        model, tokenizer = load_model_and_tokenizer(checkpoint_path=self.model_path)
         if tokenizer.pad_token is None and tokenizer.eos_token is not None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
@@ -148,7 +157,8 @@ extern "C" __global__ void wcc_kernel(const int* row_ptr, const int* col_idx, in
 ```"""
 
     def _get_model_response(self, prompt: str) -> str:
-        """Generate a model response with a safe fallback."""
+        """Generate a model response with a loud, counted fallback."""
+        self._generation_attempts += 1
         try:
             generator = self._get_generator()
             outputs = generator(
@@ -164,7 +174,23 @@ extern "C" __global__ void wcc_kernel(const int* row_ptr, const int* col_idx, in
                 text = text[len(prompt) :]
             return text.strip()
         except Exception as exc:
-            print(f"Model generation failed ({self.model_path}): {exc}. Using fallback template.")
+            self._generation_fallbacks += 1
+            if not self._generation_failure_logged:
+                self._generation_failure_logged = True
+                import traceback
+
+                print(
+                    f"ERROR: model generation failed ({self.model_path}); first "
+                    "failure traceback follows. Subsequent failures are counted, "
+                    "not re-logged.",
+                    file=sys.stderr,
+                )
+                traceback.print_exc()
+            print(
+                f"Model generation failed ({self.model_path}): {exc}. Using fallback "
+                f"template ({self._generation_fallbacks}/{self._generation_attempts} "
+                "fallbacks so far)."
+            )
             return self._fallback_kernel_template()
 
     def filter_trajectories(self, min_reward: float = 1.0) -> list[dict[str, Any]]:

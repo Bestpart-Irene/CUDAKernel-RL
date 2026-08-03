@@ -22,6 +22,7 @@ if __package__ in {None, ""}:
 
 from trl import SFTConfig, SFTTrainer
 
+from training.checkpoint_utils import find_resumable_checkpoint, has_model_files
 from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.model_loader import load_model_and_tokenizer
 from training.rft_filter import TrajectoryCollector
@@ -69,6 +70,9 @@ STAGE2_EPOCHS = _env_float("KERNELFORGE_STAGE2_EPOCHS", 3.0)
 # produces at least one checkpoint (see memory: NU 8h walltime + HF default
 # save_steps=500 silently drops short runs).
 STAGE2_SAVE_STEPS = _env_int("KERNELFORGE_STAGE2_SAVE_STEPS", 50)
+# Optional hard step cap wired by modal_train.py. 0 (default) = no cap,
+# preserving the epochs-driven behavior above.
+STAGE2_MAX_STEPS = _env_int("KERNELFORGE_STAGE2_MAX_STEPS", 0)
 USE_BF16 = sys.platform.startswith("linux")
 
 
@@ -133,13 +137,19 @@ def main():
         # Step 2: Filter
         filtered = collector.filter_trajectories(min_reward=MIN_REWARD)
         if not filtered:
-            print("No trajectories met quality threshold! Cannot proceed with Stage 2.")
-            return
-
-        # Step 3: Save filtered dataset
-        os.makedirs("datasets", exist_ok=True)
-        rft_dataset = collector.save_rft_dataset(filtered, "datasets/rft_filtered.jsonl")
-        rft_rows = rft_dataset.to_list() if hasattr(rft_dataset, "to_list") else list(rft_dataset)
+            # Do NOT bail out: returning here trained nothing at all, which is
+            # strictly worse than SKIP_RFT_COLLECTION=1 (primary corpus only).
+            print(
+                "WARNING: no RFT trajectories met the quality threshold "
+                f"(min_reward={MIN_REWARD}) — continuing with the primary "
+                f"'{SFT_DATA_SOURCE}' SFT corpus only."
+            )
+            rft_rows = []
+        else:
+            # Step 3: Save filtered dataset
+            os.makedirs("datasets", exist_ok=True)
+            rft_dataset = collector.save_rft_dataset(filtered, "datasets/rft_filtered.jsonl")
+            rft_rows = rft_dataset.to_list() if hasattr(rft_dataset, "to_list") else list(rft_dataset)
 
     primary_sft_rows = _load_primary_sft_rows()
     combined_sft_rows = primary_sft_rows + rft_rows
@@ -150,13 +160,13 @@ def main():
     )
 
     # Step 4: Load model from Stage 1 checkpoint and train.
-    # Treat the directory as a valid checkpoint only if it actually has a
-    # config.json — TRL creates the output dir at trainer init even when no
-    # save_steps ever fires, so a bare empty dir is not a checkpoint.
-    has_ckpt = (
-        os.path.exists(STAGE1_OUTPUT)
-        and os.path.isfile(os.path.join(STAGE1_OUTPUT, "config.json"))
-    )
+    # Treat the directory as a valid checkpoint only if it actually has model
+    # files — TRL creates the output dir at trainer init even when no
+    # save_steps ever fires, so a bare empty dir is not a checkpoint. Stage 1
+    # saves a PEFT adapter (adapter_config.json, NO config.json), so the gate
+    # must accept either; requiring config.json alone silently trained the
+    # base model on every handoff.
+    has_ckpt = has_model_files(STAGE1_OUTPUT)
     checkpoint_path = STAGE1_OUTPUT if has_ckpt else None
     print(
         f"Loading Stage 1 checkpoint from {STAGE1_OUTPUT}..."
@@ -172,7 +182,7 @@ def main():
     total_steps = max(1, int(steps_per_epoch * STAGE2_EPOCHS))
     save_steps = min(STAGE2_SAVE_STEPS, max(1, total_steps // 2))
 
-    config = SFTConfig(
+    sft_kwargs = dict(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
@@ -185,9 +195,14 @@ def main():
         max_length=8192,
         eos_token=tokenizer.eos_token,
     )
+    if STAGE2_MAX_STEPS > 0:
+        sft_kwargs["max_steps"] = STAGE2_MAX_STEPS
+        total_steps = min(total_steps, STAGE2_MAX_STEPS)
+    config = SFTConfig(**sft_kwargs)
     print(
         f"Stage 2 SFT: corpus={len(combined_sft_rows)} rows, "
         f"epochs={STAGE2_EPOCHS}, total_steps={total_steps}, save_steps={save_steps}"
+        + (f", max_steps cap={STAGE2_MAX_STEPS}" if STAGE2_MAX_STEPS > 0 else "")
     )
 
     # Dataset has `messages` field; TRL SFTTrainer auto-applies the chat template
@@ -199,23 +214,19 @@ def main():
         train_dataset=train_dataset,
     )
 
-    # Auto-resume from the latest checkpoint in OUTPUT_DIR if one exists.
+    # Auto-resume from the newest VALID checkpoint in OUTPUT_DIR if one exists.
     # HF Trainer does NOT auto-resume just because checkpoints are present —
-    # it requires resume_from_checkpoint=True (job 6920681 lesson, 2026-05-19:
+    # it requires resume_from_checkpoint (job 6920681 lesson, 2026-05-19:
     # we expected resume but got "loading base model" instead, wasting 1.5h).
-    resume = False
-    if os.path.isdir(OUTPUT_DIR):
-        ckpts = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
-        if ckpts:
-            resume = True
-            print(
-                f"Stage 2 SFT: auto-resuming from latest checkpoint in {OUTPUT_DIR} "
-                f"(found {sorted(ckpts)})"
-            )
-    if not resume:
-        print(f"Stage 2 SFT: no existing checkpoint in {OUTPUT_DIR}; starting fresh.")
+    # Passing the specific path (not True) skips half-written checkpoints a
+    # walltime kill left behind.
+    resume_ckpt = find_resumable_checkpoint(OUTPUT_DIR)
+    if resume_ckpt:
+        print(f"Stage 2 SFT: auto-resuming from checkpoint {resume_ckpt}")
+    else:
+        print(f"Stage 2 SFT: no valid checkpoint in {OUTPUT_DIR}; starting fresh.")
     print("Starting Stage 2 SFT training on filtered trajectories...")
-    trainer.train(resume_from_checkpoint=resume)
+    trainer.train(resume_from_checkpoint=resume_ckpt if resume_ckpt else None)
 
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
@@ -228,7 +239,7 @@ def main():
               f"rewards min={min(rewards):.1f} max={max(rewards):.1f} "
               f"mean={sum(rewards)/len(rewards):.2f}")
     else:
-        print("RFT stats: 0 trajectories (SKIP_RFT_COLLECTION=1, SFT-only run).")
+        print("RFT stats: 0 trajectories (SFT-only run on the primary corpus).")
 
 
 if __name__ == "__main__":

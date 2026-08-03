@@ -73,8 +73,23 @@ def extract_cuda_code(text: str) -> str:
         # but keep whatever body the model emitted.
         return text[start:].strip()
 
+    # Untagged ``` fence (or a tag not in the list above): take the first
+    # fenced body that looks like kernel code. Without this, the raw-regex
+    # fallback below returned the WHOLE text including the backtick lines.
+    fenced = re.search(r"```[^\n`]*\n(.*?)(?:\n```|$)", text, re.DOTALL)
+    if fenced:
+        body = fenced.group(1).strip()
+        if (
+            re.search(r"__global__\s+void\s+\w+", body)
+            or "PYBIND11_MODULE" in body
+            or 'extern "C"' in body
+        ):
+            return body
+
     if re.search(r"__global__\s+void\s+\w+", text) or "PYBIND11_MODULE" in text:
-        return text.strip()
+        # Strip stray fence lines so nvcc never sees backticks.
+        lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+        return "\n".join(lines).strip()
     return ""
 
 
@@ -107,6 +122,8 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
     if "torch/extension.h" in code or "PYBIND11_MODULE" in code:
         return True, ""
 
+    cu_path = None
+    obj_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".cu", mode="w", delete=False) as f:
             f.write(code)
@@ -123,12 +140,6 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
             timeout=15,
         )
 
-        for path in (cu_path, obj_path):
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-
         if proc.returncode != 0:
             return False, proc.stderr[:1000]
         return True, ""
@@ -141,6 +152,16 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
         return False, "Local compile timed out (15s)"
     except Exception as exc:
         return False, f"Local compile raised: {type(exc).__name__}: {exc}"
+    finally:
+        # Cleanup must run on the exception paths too — subprocess timeouts
+        # were leaking one .cu per failed rollout into $TMPDIR.
+        for path in (cu_path, obj_path):
+            if path is None:
+                continue
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def _compute_reward_from_result(result: dict) -> float:
@@ -192,19 +213,34 @@ def _format_feedback(result: dict, reward: float, turn: int) -> str:
 
 
 _baselines_cache: dict[str, Any] | None = None
+_baselines_failure_count = 0
+_BASELINE_FAILURE_LOG_EVERY = 10
 
 
 def _get_baselines() -> tuple[float | None, float | None]:
-    """Fetch baseline timings from eval backend (cached across calls)."""
-    global _baselines_cache
+    """Fetch baseline timings from eval backend (cached across calls).
+
+    Only successful fetches are cached — a transient eval-service failure
+    must not pin `{}` forever; the next call retries. Failures are logged on
+    the first occurrence and then every Nth to avoid spam.
+    """
+    global _baselines_cache, _baselines_failure_count
     if _baselines_cache is None:
         try:
             from openenv_env.eval_backend import dispatch_eval
 
             _baselines_cache = dispatch_eval("profile_baselines") or {}
         except Exception as exc:
-            print(f"Baseline profiling failed: {exc}")
-            _baselines_cache = {}
+            _baselines_failure_count += 1
+            if (
+                _baselines_failure_count == 1
+                or _baselines_failure_count % _BASELINE_FAILURE_LOG_EVERY == 0
+            ):
+                print(
+                    f"Baseline profiling failed (attempt {_baselines_failure_count}, "
+                    f"will retry on next call): {exc}"
+                )
+            return None, None
     return _baselines_cache.get("original_ms"), _baselines_cache.get("doublegraph_ms")
 
 
@@ -411,14 +447,21 @@ def reward_from_env(completions: list[str], **kwargs: Any) -> list[float]:
 
     rewards: list[float] = []
     for i, completion in enumerate(completions):
-        task_row = normalize_task_row({
+        row_payload = {
             "prompt": _row_field("prompts", i) or _row_field("prompt", i),
             "task_code": _row_field("task_code", i),
             "ops": _row_field("ops", i),
             "data_source": _row_field("data_source", i),
             "evaluation_backend": _row_field("evaluation_backend", i),
             "difficulty": _row_field("difficulty", i),
-        })
+        }
+        # extern_c_signature drives the E1/E2 ctypes contract in the ops6k
+        # evaluator — dropping it here silently degraded E2 tasks to the
+        # inferred-signature fallback. Include only when the source row has it.
+        extern_c_signature = _row_field("extern_c_signature", i)
+        if extern_c_signature is not None:
+            row_payload["extern_c_signature"] = extern_c_signature
+        task_row = normalize_task_row(row_payload)
 
         code = extract_cuda_code(completion)
         if not code:

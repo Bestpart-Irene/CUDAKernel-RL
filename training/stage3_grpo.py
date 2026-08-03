@@ -35,11 +35,13 @@ if __package__ in {None, ""}:
 
 from trl import GRPOConfig, GRPOTrainer
 
+from training.checkpoint_utils import find_resumable_checkpoint, has_model_files
+from training.config_utils import filter_config_kwargs
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
 from training.model_loader import load_model_and_tokenizer
 from training.curriculum import CurriculumManager, format_problem_prompt
 from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
-from training.multi_turn_rollout import make_multi_turn_rollout
+from training.multi_turn_rollout import make_multi_turn_rollout, reward_from_env
 from training.task_support import normalize_task_row
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
@@ -66,6 +68,10 @@ USE_TRLOO = os.getenv("KERNELFORGE_USE_TRLOO", "1") == "1"
 PER_DEVICE_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION_STEPS = 4
 NUM_GENERATIONS = int(os.getenv("KERNELFORGE_STAGE3_NUM_GENERATIONS", "2"))
+# Env knobs wired by modal_train.py — defaults match the prior hardcoded values.
+SCALE_REWARDS = os.getenv("KERNELFORGE_STAGE3_SCALE_REWARDS", "batch")
+BETA = float(os.getenv("KERNELFORGE_STAGE3_BETA", "0.0"))
+MAX_PROMPT_LENGTH = int(os.getenv("KERNELFORGE_STAGE3_MAX_PROMPT_LENGTH", "3072"))
 # Local compile check controlled by KERNELFORGE_LOCAL_COMPILE in multi_turn_rollout.py.
 # Set KERNELFORGE_LOCAL_COMPILE=0 to skip local compile pre-check (slower but simpler).
 
@@ -75,12 +81,15 @@ curriculum = CurriculumManager()
 
 
 def reward_from_env_with_curriculum(completions, **kwargs) -> list[float]:
-    """Extract environment rewards and feed them to the curriculum manager."""
-    env_rewards = kwargs.get("env_reward", [])
-    if not env_rewards:
-        return [-1.0] * len(completions)
+    """Compute rewards via reward_from_env, then feed them to the curriculum manager.
 
-    rewards = [float(r) for r in env_rewards]
+    Delegating to multi_turn_rollout.reward_from_env matters: on the default
+    non-vLLM path TRL 0.29 never feeds `env_reward` into reward funcs, so the
+    old `[-1.0] * len(completions)` fallback here returned a constant on every
+    step. reward_from_env passes env_reward through when present and otherwise
+    inline-evaluates each completion (extract → compile → eval → reward.py).
+    """
+    rewards = reward_from_env(completions, **kwargs)
 
     # Feed each reward to curriculum for promotion/demotion
     for r in rewards:
@@ -167,11 +176,19 @@ def main():
         print(f"  Could not inject combined dataset into curriculum: {e}")
         print("  Continuing with built-in curriculum problems only")
 
+    # A bare dir (created by TRL at trainer init, or left by a walltime kill
+    # before the first save) is not a checkpoint — require real model files
+    # (config.json for full saves, adapter_config.json for PEFT adapters).
     checkpoint_path = None
-    if os.path.exists(STAGE2_OUTPUT):
+    if has_model_files(STAGE2_OUTPUT):
         checkpoint_path = STAGE2_OUTPUT
-    elif os.path.exists(STAGE1_OUTPUT):
+    elif has_model_files(STAGE1_OUTPUT):
         checkpoint_path = STAGE1_OUTPUT
+    if checkpoint_path is None:
+        print(
+            f"  No usable stage checkpoint in {STAGE2_OUTPUT} or {STAGE1_OUTPUT} "
+            "(missing config.json/adapter_config.json) — loading base model."
+        )
 
     model, tokenizer = load_model_and_tokenizer(checkpoint_path=checkpoint_path)
     dataset, sampled_rows = build_curriculum_dataset(num_prompts=200)
@@ -189,11 +206,11 @@ def main():
         temperature=0.7,
         num_generations=NUM_GENERATIONS,
         num_iterations=1,
-        beta=0.0,                        # No ref model — saves memory
+        beta=BETA,                       # Default 0.0: no ref model — saves memory
         epsilon=0.2,
-        scale_rewards="batch",           # Better for sparse expensive env
+        scale_rewards=SCALE_REWARDS,     # Default "batch": better for sparse expensive env
         remove_unused_columns=False,     # Custom rollout needs extra columns
-        max_prompt_length=3072,
+        max_prompt_length=MAX_PROMPT_LENGTH,
         max_completion_length=MAX_COMPLETION_LENGTH,
         per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
@@ -218,10 +235,11 @@ def main():
         elif VLLM_MODE == "colocate":
             grpo_kwargs["vllm_gpu_memory_utilization"] = VLLM_GPU_MEMORY_UTILIZATION
 
-    config = GRPOConfig(**grpo_kwargs)
+    # Filter against the installed GRPOConfig so TRL field drift (e.g.
+    # max_prompt_length removed in 0.29) warns instead of TypeError-ing.
+    config = GRPOConfig(**filter_config_kwargs(GRPOConfig, grpo_kwargs))
 
     trainer_cls = TRLOOGRPOTrainer if USE_TRLOO else GRPOTrainer
-    print(f"  Trainer: {trainer_cls.__name__} (USE_TRLOO={USE_TRLOO})")
     trainer = trainer_cls(
         model=model,
         processing_class=tokenizer,
@@ -230,6 +248,14 @@ def main():
         args=config,
         train_dataset=dataset,
     )
+    if USE_TRLOO:
+        trloo_active = getattr(trainer, "_trloo_active", False)
+        print(
+            f"  Trainer: {trainer_cls.__name__} (USE_TRLOO=1, TRLOO correction "
+            f"{'ACTIVE' if trloo_active else 'INACTIVE — no _compute_advantages hook in this TRL version'})"
+        )
+    else:
+        print(f"  Trainer: {trainer_cls.__name__} (USE_TRLOO=0)")
 
     # Decision gate: if post-RFT model already strong, skip GRPO
     skip_threshold_compile = float(os.getenv("KERNELFORGE_GATE_COMPILE", "0.95"))
@@ -250,22 +276,17 @@ def main():
         except Exception as e:
             print(f"  Decision gate failed ({e}), proceeding with GRPO...")
 
-    # Auto-resume from latest checkpoint in OUTPUT_DIR (HF Trainer does NOT do
-    # this by default — requires resume_from_checkpoint=True). Mirrors the
-    # stage2_rft.py fix from commit 5b59d2e + stage1_warmup.py fix.
-    resume = False
-    if os.path.isdir(OUTPUT_DIR):
-        ckpts = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
-        if ckpts:
-            resume = True
-            print(
-                f"Stage 3: auto-resuming from latest checkpoint in {OUTPUT_DIR} "
-                f"(found {sorted(ckpts)})"
-            )
-    if not resume:
-        print(f"Stage 3: no existing checkpoint in {OUTPUT_DIR}; starting fresh.")
+    # Auto-resume from the newest VALID checkpoint in OUTPUT_DIR (HF Trainer
+    # does NOT do this by default — requires resume_from_checkpoint). Passing
+    # the specific path (not True) skips half-written checkpoints a walltime
+    # kill left behind. Mirrors stage1_warmup.py / stage2_rft.py.
+    resume_ckpt = find_resumable_checkpoint(OUTPUT_DIR)
+    if resume_ckpt:
+        print(f"Stage 3: auto-resuming from checkpoint {resume_ckpt}")
+    else:
+        print(f"Stage 3: no valid checkpoint in {OUTPUT_DIR}; starting fresh.")
     print("Starting Stage 3 training...")
-    trainer.train(resume_from_checkpoint=resume)
+    trainer.train(resume_from_checkpoint=resume_ckpt if resume_ckpt else None)
 
     model.save_pretrained(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)

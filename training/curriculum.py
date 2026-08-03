@@ -307,6 +307,19 @@ def _default_phases() -> list[CurriculumPhase]:
     ]
 
 
+def _fmt_count(value) -> str:
+    """Format numbers with thousands separators; pass strings ('?') through.
+
+    The '?' fallback from props.get(..., '?') meets the ',' format spec
+    otherwise and raises ValueError.
+    """
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return f"{value:,}"
+    return str(value)
+
+
 def format_topology_context(problem: dict) -> str:
     """Format graph topology properties as text context for the model.
 
@@ -325,7 +338,7 @@ def format_topology_context(problem: dict) -> str:
     lines = [
         "\n## Graph Topology Context",
         f"Type: {props.get('type', 'unknown')}",
-        f"Vertices: {props.get('num_vertices', '?'):,} | Edges: {props.get('num_edges', '?'):,}",
+        f"Vertices: {_fmt_count(props.get('num_vertices', '?'))} | Edges: {_fmt_count(props.get('num_edges', '?'))}",
         f"Avg degree: {props.get('avg_degree', '?')} | Max degree: {props.get('max_degree', '?')}",
         f"Density: {props.get('density', '?')} | Diameter: {props.get('diameter', '?')}",
         f"Distribution: {props.get('degree_distribution', 'unknown')}",

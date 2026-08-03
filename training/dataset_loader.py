@@ -8,14 +8,34 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_cwd = os.getcwd()
-_orig_sys_path = list(sys.path)
-sys.path = [p for p in sys.path if p not in ("", ".", _cwd)]
-try:
-    import datasets as _hf_datasets  # noqa: E402
-except Exception:  # pragma: no cover - optional local dependency
-    _hf_datasets = None
-sys.path = _orig_sys_path
+def _probe_hf_datasets():
+    """Import HuggingFace `datasets`, guarding against the repo's datasets/ dir.
+
+    With ROOT on sys.path (or an editable-install path hook), `import datasets`
+    can resolve to the repo's datasets/ directory as a namespace package. That
+    shadow has no `Dataset` attribute, so verify inside the try and fall back
+    to MiniDataset instead of raising AttributeError at import time.
+    """
+    root = str(Path(__file__).resolve().parents[1])
+    cwd = os.getcwd()
+    orig_sys_path = list(sys.path)
+    sys.path = [p for p in sys.path if p not in ("", ".", cwd, root)]
+    try:
+        import datasets as hf_datasets  # noqa: E402
+
+        hf_datasets.Dataset  # namespace-package shadow lacks this attribute
+        return hf_datasets
+    except Exception:  # pragma: no cover - optional local dependency
+        # Drop a cached shadow module so later probes can retry cleanly.
+        shadow = sys.modules.get("datasets")
+        if shadow is not None and not hasattr(shadow, "Dataset"):
+            sys.modules.pop("datasets", None)
+        return None
+    finally:
+        sys.path = orig_sys_path
+
+
+_hf_datasets = _probe_hf_datasets()
 Dataset = _hf_datasets.Dataset if _hf_datasets is not None else Any
 
 from training.curriculum import CurriculumManager
@@ -80,27 +100,54 @@ def _load_or_build_combined_rows(
     seed: int,
     combined_output: str,
 ) -> list[dict[str, Any]]:
+    """Load the combined dataset cache; never rebuild it implicitly.
+
+    Rebuilding overwrites datasets/combined_kernelforge.jsonl, destroying any
+    manually curated rows (e.g. the vector_add_e2 task). Regeneration requires
+    KERNELFORGE_ALLOW_DATASET_REBUILD=1; a cache that looks inconsistent with
+    the request is served as-is with a LOUD warning instead.
+    """
     combined_path = Path(combined_output)
-    rows: list[dict[str, Any]]
+    allow_rebuild = os.getenv("KERNELFORGE_ALLOW_DATASET_REBUILD", "0") == "1"
 
-    if combined_path.exists():
-        rows = _read_jsonl(combined_path)
-    else:
-        rows = []
+    rows: list[dict[str, Any]] = _read_jsonl(combined_path) if combined_path.exists() else []
 
-    needs_regen = not rows
-    if rows and ops6k_max is not None and int(ops6k_max) > 0:
-        has_ops_tasks = any(str(row.get("task_code") or "").strip() for row in rows)
-        needs_regen = needs_regen or not has_ops_tasks
-
-    if needs_regen:
-        rows = build_combined_dataset(
-            dg_path=dg_manifest,
-            ops6k_max=ops6k_max,
-            seed=seed,
+    if rows:
+        looks_inconsistent = False
+        if ops6k_max is not None and int(ops6k_max) > 0:
+            has_ops_tasks = any(str(row.get("task_code") or "").strip() for row in rows)
+            looks_inconsistent = not has_ops_tasks
+        if not looks_inconsistent:
+            return rows
+        if not allow_rebuild:
+            print(
+                f"WARNING: {combined_path} looks inconsistent with this request "
+                f"(no task_code rows but ops6k_max={ops6k_max} was requested). "
+                "Serving the existing cache UNCHANGED — it may be stale or built "
+                "with different params. Set KERNELFORGE_ALLOW_DATASET_REBUILD=1 "
+                "to regenerate (this OVERWRITES manually curated rows).",
+                flush=True,
+            )
+            return rows
+        print(
+            f"KERNELFORGE_ALLOW_DATASET_REBUILD=1 — rebuilding inconsistent cache "
+            f"{combined_path} (ops6k_max={ops6k_max}).",
+            flush=True,
         )
-        write_jsonl(rows, combined_path)
+    elif not allow_rebuild:
+        raise RuntimeError(
+            f"Combined dataset {combined_path} is missing or empty, and implicit "
+            "rebuilds are disabled. Set KERNELFORGE_ALLOW_DATASET_REBUILD=1 to "
+            "build it (this writes the file from the doubleGraph manifest + "
+            "Ops-6K, overwriting any manual curation)."
+        )
 
+    rows = build_combined_dataset(
+        dg_path=dg_manifest,
+        ops6k_max=ops6k_max,
+        seed=seed,
+    )
+    write_jsonl(rows, combined_path)
     return rows
 
 
