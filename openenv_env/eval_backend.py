@@ -12,17 +12,48 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from typing import Any
 
-EVAL_BACKEND = os.getenv("KERNELFORGE_EVAL_BACKEND", "coreweave")
-EVAL_URL = os.getenv("KERNELFORGE_EVAL_URL", "")
-MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 
-# Subprocess timeout (seconds) per single eval call. Caps user-kernel
-# infinite loops and runaway compiles from blocking the trainer.
-EVAL_SUBPROCESS_TIMEOUT = int(os.getenv("KERNELFORGE_EVAL_SUBPROCESS_TIMEOUT", "180"))
+# Env vars are looked up at CALL time (not import time) so that setting
+# KERNELFORGE_EVAL_* after this module is imported still takes effect.
+
+def _backend() -> str:
+    return os.getenv("KERNELFORGE_EVAL_BACKEND", "coreweave")
+
+
+def _url() -> str:
+    return os.getenv("KERNELFORGE_EVAL_URL", "")
+
+
+def _modal_app_name() -> str:
+    return os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
+
+
+def _subprocess_timeout() -> int:
+    # Subprocess timeout (seconds) per single eval call. Caps user-kernel
+    # infinite loops and runaway compiles from blocking the trainer.
+    return int(os.getenv("KERNELFORGE_EVAL_SUBPROCESS_TIMEOUT", "180"))
+
+
+# Backward compat: modules that do `from openenv_env.eval_backend import
+# EVAL_BACKEND, EVAL_URL` (training/grpo_train.py, modal_train.py) still get
+# a value — resolved live at the moment the attribute is accessed.
+_DYNAMIC_ATTRS = {
+    "EVAL_BACKEND": _backend,
+    "EVAL_URL": _url,
+    "MODAL_APP_NAME": _modal_app_name,
+    "EVAL_SUBPROCESS_TIMEOUT": _subprocess_timeout,
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _DYNAMIC_ATTRS:
+        return _DYNAMIC_ATTRS[name]()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Functions whose execution may corrupt CUDA context (run arbitrary user
 # kernels). Always dispatched through `eval_service/worker_main.py`
@@ -42,9 +73,10 @@ def dispatch_eval(fn_name: str, payload: dict[str, Any] | None = None) -> dict[s
     Returns:
         Evaluation result dict.
     """
-    if EVAL_BACKEND == "local":
+    backend = _backend()
+    if backend == "local":
         return _dispatch_local(fn_name, payload)
-    if EVAL_BACKEND == "modal":
+    if backend == "modal":
         return _dispatch_modal(fn_name, payload)
     return _dispatch_http(fn_name, payload)
 
@@ -53,12 +85,13 @@ def _dispatch_http(fn_name: str, payload: dict[str, Any] | None) -> dict[str, An
     """Dispatch via HTTP POST to CoreWeave/Northflank eval service."""
     import httpx
 
-    if not EVAL_URL:
+    eval_url = _url()
+    if not eval_url:
         raise RuntimeError(
             "KERNELFORGE_EVAL_URL must be set when KERNELFORGE_EVAL_BACKEND=coreweave. "
             "Set it to the Northflank eval service URL (e.g. https://eval-kernelforge.northflank.app)."
         )
-    url = f"{EVAL_URL.rstrip('/')}/{fn_name}"
+    url = f"{eval_url.rstrip('/')}/{fn_name}"
     resp = httpx.post(url, json=payload or {}, timeout=300.0)
     resp.raise_for_status()
     return resp.json()
@@ -68,7 +101,7 @@ def _dispatch_modal(fn_name: str, payload: dict[str, Any] | None) -> dict[str, A
     """Dispatch via Modal serverless function."""
     import modal
 
-    fn = modal.Function.from_name(MODAL_APP_NAME, fn_name)
+    fn = modal.Function.from_name(_modal_app_name(), fn_name)
     if payload is None:
         return fn.remote()
     return fn.remote(payload)
@@ -86,6 +119,42 @@ def _safe_local_failure(reason: str) -> dict[str, Any]:
     }
 
 
+def _kill_process_group(proc: subprocess.Popen, grace_s: float = 5.0) -> None:
+    """Kill a worker and its whole process group (nvcc/CUDA grandchildren).
+
+    SIGTERM first, then SIGKILL after a grace period. The worker must have
+    been launched with start_new_session=True so its group id == its pid.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, PermissionError, OSError):
+        pgid = None
+
+    def _signal_group(sig: int) -> None:
+        if pgid is not None:
+            try:
+                os.killpg(pgid, sig)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        # Fallback: at least signal the direct child.
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+    _signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace_s)
+    except subprocess.TimeoutExpired:
+        _signal_group(signal.SIGKILL)
+    # Reap the child and close pipes (best effort).
+    try:
+        proc.communicate(timeout=5.0)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+
+
 def _dispatch_local_subprocess(
     fn_name: str, payload: dict[str, Any] | list[dict[str, Any]] | None
 ) -> dict[str, Any]:
@@ -93,35 +162,41 @@ def _dispatch_local_subprocess(
 
     If the subprocess crashes (CUDA fault, OOM, etc.) the parent reads
     the non-zero return code and returns a safe failure dict; training
-    continues unaffected. Timeout caps runaway kernels.
+    continues unaffected. Timeout caps runaway kernels. The worker runs
+    in its own session/process group so a timeout kills nvcc/CUDA
+    grandchildren too, not just the direct child.
     """
     req = json.dumps({"fn_name": fn_name, "payload": payload})
+    timeout_s = _subprocess_timeout()
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-m", "eval_service.worker_main"],
-            input=req,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=EVAL_SUBPROCESS_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return _safe_local_failure(
-            f"subprocess timeout ({EVAL_SUBPROCESS_TIMEOUT}s)"
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         return _safe_local_failure(f"subprocess spawn failed: {exc}")
+
+    try:
+        stdout, stderr = proc.communicate(input=req, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        return _safe_local_failure(f"subprocess timeout ({timeout_s}s)")
 
     if proc.returncode != 0:
         # Subprocess died (likely CUDA fault) — stdout JSON may be missing.
         return _safe_local_failure(
             f"subprocess exit {proc.returncode}: "
-            f"stderr={proc.stderr[:400]} stdout={proc.stdout[:200]}"
+            f"stderr={stderr[:400]} stdout={stdout[:200]}"
         )
     try:
-        return json.loads(proc.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError:
         return _safe_local_failure(
-            f"subprocess produced non-JSON stdout: {proc.stdout[:500]}"
+            f"subprocess produced non-JSON stdout: {stdout[:500]}"
         )
 
 

@@ -58,12 +58,15 @@ class GPUCachePool:
             self._touch(key)
             return self._items[key].value
 
+        # Create the new value BEFORE evicting: a raising factory must not
+        # destroy a healthy cached resource for nothing.
+        value = factory()
+
         if len(self._items) >= self.max_entries:
             evict_key = self._order.pop(0)
             evicted = self._items.pop(evict_key)
             self._cleanup(evicted.value)
 
-        value = factory()
         self._items[key] = GPUCacheEntry(key=key, value=value, metadata=metadata or {})
         self._touch(key)
         return value
@@ -84,3 +87,5 @@ class GPUCachePool:
 
     def __len__(self) -> int:
         return len(self._items)
+
+

@@ -55,7 +55,10 @@ class TaskPool:
             if combined.exists():
                 with open(combined, encoding="utf-8") as f:
                     for line in f:
-                        row = json.loads(line.strip())
+                        line = line.strip()
+                        if not line:
+                            continue
+                        row = json.loads(line)
                         if row.get("evaluation_backend") in {"ops6k", "wcc"}:
                             tasks.append(row)
 
@@ -77,8 +80,16 @@ class TaskPool:
             task_id: If provided, return this specific task.
             seed: Random seed for reproducible sampling.
             backend: If provided, filter to tasks with this backend ("ops6k" or "wcc").
+
+        Raises:
+            KeyError: If task_id is provided but not present in the pool.
         """
-        if task_id and task_id in self._by_id:
+        if task_id:
+            if task_id not in self._by_id:
+                raise KeyError(
+                    f"Unknown task_id: {task_id!r} — not in pool "
+                    f"({len(self._by_id)} known task ids)."
+                )
             return dict(self._by_id[task_id])
 
         pool = self.tasks

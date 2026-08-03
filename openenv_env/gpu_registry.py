@@ -8,6 +8,7 @@ via per-architecture specs. We make this runtime-configurable.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 GPU_REGISTRY: dict[str, dict[str, Any]] = {
@@ -93,10 +94,14 @@ GPU_REGISTRY: dict[str, dict[str, Any]] = {
 
 
 def get_gpu_spec(gpu_name: str) -> dict[str, Any]:
-    """Look up GPU spec by name. Raises ValueError if unknown."""
+    """Look up GPU spec by name. Raises ValueError if unknown.
+
+    Returns a deep copy so consumer mutation cannot poison the
+    process-wide registry.
+    """
     key = gpu_name.lower()
     if key not in GPU_REGISTRY:
         raise ValueError(
             f"Unknown GPU: {gpu_name!r}. Available: {list(GPU_REGISTRY.keys())}"
         )
-    return GPU_REGISTRY[key]
+    return copy.deepcopy(GPU_REGISTRY[key])

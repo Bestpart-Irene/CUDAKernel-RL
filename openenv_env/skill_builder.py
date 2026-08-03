@@ -29,6 +29,12 @@ def build_skill_md(gpu_name: str = "a100") -> str:
             if gpu_name.lower() == "a100":
                 skill = _append_a100_patterns(skill)
             return skill
+        print(
+            f"[skill_builder] WARNING: KERNELFORGE_SKILL_FILE={env_file!r} "
+            f"does not exist at {path!r} — falling back to "
+            f"static/generated SKILL.md.",
+            flush=True,
+        )
 
     static_path = os.path.join(root, f"skill_{gpu_name.lower()}.md")
     if os.path.exists(static_path):

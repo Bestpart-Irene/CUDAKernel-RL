@@ -49,6 +49,7 @@ class KernelForgeEnv(Environment):
         self.doublegraph_baseline_ms = None
         self.current_task: dict[str, Any] | None = None
         self._state = State(episode_id=str(uuid4()), step_count=0)
+        self._baseline_warned: set[str] = set()
 
     def reset(
         self,
@@ -80,8 +81,9 @@ class KernelForgeEnv(Environment):
         tid = self.current_task.get("task_id", "")
         cached = self.task_pool.get_cached_baselines(tid) if tid else None
         if cached:
-            self.original_baseline_ms = cached.get("eager_ms")
-            self.doublegraph_baseline_ms = cached.get("compile_ms")
+            # Treat 0.0/None as "not profiled" so the re-profile guard below fires.
+            self.original_baseline_ms = cached.get("eager_ms") or None
+            self.doublegraph_baseline_ms = cached.get("compile_ms") or None
 
         # Profile WCC baselines on first call (graph tasks only)
         if (
@@ -92,8 +94,17 @@ class KernelForgeEnv(Environment):
                 baselines = self._dispatch("profile_baselines")
                 self.original_baseline_ms = baselines.get("original_ms")
                 self.doublegraph_baseline_ms = baselines.get("doublegraph_ms")
-            except Exception:
-                pass
+            except Exception as exc:
+                # Non-fatal (episode proceeds without baselines), but do not
+                # hide eval-backend outages. Warn once per task id.
+                if tid not in self._baseline_warned:
+                    self._baseline_warned.add(tid)
+                    print(
+                        f"[KernelForgeEnv] WARNING: profile_baselines failed "
+                        f"for task {tid!r}: {exc!r} — proceeding without "
+                        f"baselines (warned once per task).",
+                        flush=True,
+                    )
 
         # Build initial observation with SKILL.md + task + reference code + contract
         task_prompt = self.current_task.get("prompt", "")
@@ -162,12 +173,12 @@ class KernelForgeEnv(Environment):
         if not result.get("compiles"):
             su_orig = 0
             obs = (f"COMPILATION FAILED (turn {self.turn}/{self.max_turns}):\n"
-                   f"{result.get('error', 'Unknown error')[:1500]}")
+                   f"{(result.get('error') or 'Unknown error')[:1500]}")
             reward = compute_task_reward(result)
         elif not result.get("correct"):
             su_orig = 0
             obs = (f"VERIFICATION FAILED (turn {self.turn}/{self.max_turns}):\n"
-                   f"{result.get('verifier_msg', result.get('error', 'Unknown failure'))}")
+                   f"{result.get('verifier_msg') or result.get('error') or 'Unknown failure'}")
             reward = compute_task_reward(result)
         else:
             rt = float(result["runtime_ms"])
@@ -197,12 +208,17 @@ class KernelForgeEnv(Environment):
                 self.original_baseline_ms = result["baseline_eager_ms"]
             if result.get("baseline_compile_ms") and not self.doublegraph_baseline_ms:
                 self.doublegraph_baseline_ms = result["baseline_compile_ms"]
+            # Only cache baselines that were actually measured — never coerce
+            # a missing baseline to 0.0 (a cached 0.0 would defeat the
+            # "is None → re-profile" guard in reset()).
             tid = (self.current_task or {}).get("task_id", "")
-            if tid and (self.original_baseline_ms or self.doublegraph_baseline_ms):
-                self.task_pool.cache_baselines(tid, {
-                    "eager_ms": self.original_baseline_ms or 0.0,
-                    "compile_ms": self.doublegraph_baseline_ms or 0.0,
-                })
+            baselines_to_cache: dict[str, float] = {}
+            if self.original_baseline_ms:
+                baselines_to_cache["eager_ms"] = self.original_baseline_ms
+            if self.doublegraph_baseline_ms:
+                baselines_to_cache["compile_ms"] = self.doublegraph_baseline_ms
+            if tid and baselines_to_cache:
+                self.task_pool.cache_baselines(tid, baselines_to_cache)
 
             backend = (self.current_task or {}).get("evaluation_backend", "ops6k")
             if backend == "ops6k":
@@ -218,9 +234,11 @@ class KernelForgeEnv(Environment):
                     obs += f"\n  vs doubleGraph: {su_dg:.2f}x"
             obs += f"\n  Stats: {result.get('runtime_stats', {})}"
 
-            if reward > self.best_reward:
-                self.best_reward = reward
-                self.best_code = action.cuda_code
+        # Track best reward across ALL outcomes (not just correct kernels):
+        # 0.0/-0.5 outcomes must lift best_reward above the -1.0 floor too.
+        if reward > self.best_reward:
+            self.best_reward = reward
+            self.best_code = action.cuda_code
 
         done = (self.turn >= self.max_turns) or (reward >= 3.0)
 
