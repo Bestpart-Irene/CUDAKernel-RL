@@ -45,8 +45,10 @@ echo "Backend:    $EVAL_BACKEND"
 mkdir -p "$OUTPUT_DIR"
 
 if [[ "$EVAL_BACKEND" == "modal" ]]; then
-    if ! modal token verify 2>/dev/null; then
-        echo "WARNING: Modal token not configured. Stage 2 evaluation will fail."
+    # `modal token verify` is not a real subcommand; `modal profile current`
+    # (modal 1.3.5) exits non-zero when no profile/token is configured.
+    if ! modal profile current >/dev/null 2>&1; then
+        echo "WARNING: Modal profile not configured. Stage 2 evaluation will fail."
         echo "  Run: modal token set"
     fi
 elif [[ "$EVAL_BACKEND" == "coreweave" && -z "$EVAL_URL" ]]; then
@@ -82,7 +84,11 @@ print(f'Found {len(seed_codes)} seed kernels.')
 # Validate seeds via stage1
 for i, code in enumerate(seed_codes):
     result = evaluator.evaluate_stage1(code)
-    status = 'PASS' if result.metrics.get('compiles') else 'FAIL'
+    compiles = result.metrics.get('compiles')
+    if compiles == 'skipped':
+        status = 'SKIPPED (no local nvcc — remote stage2 will compile)'
+    else:
+        status = 'PASS' if compiles else 'FAIL'
     print(f'  Stage1 seed {i}: {status} (score={result.combined_score})')
 
 dry_run = $([[ "$DRY_RUN" == "true" ]] && echo "True" || echo "False")

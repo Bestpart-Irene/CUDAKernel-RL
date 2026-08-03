@@ -1,0 +1,12 @@
+# Grafana datasource provisioning for the KernelForge monitoring profile.
+# The `grafana` service mounts ./monitoring/grafana at /etc/grafana/provisioning,
+# so this file lands at /etc/grafana/provisioning/datasources/prometheus.yml.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

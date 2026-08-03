@@ -96,18 +96,26 @@ class Island:
     stagnation_counter: int = 0
     max_population: int = 10
 
-    def add(self, candidate: Candidate) -> None:
-        """Add candidate to population, evict worst if at capacity."""
+    def add(self, candidate: Candidate, count_eval: bool = True) -> None:
+        """Add candidate to population, evict worst if at capacity.
+
+        count_eval=False (breakthrough broadcast path) updates the population
+        and best_score WITHOUT charging an evaluation to this island's UCB
+        stats — the island spent no eval, so eval_count/total_improvement
+        must not move or UCB1 scheduling gets polluted.
+        """
         self.population.append(candidate)
         if candidate.score > self.best_score:
             improvement = candidate.score - self.best_score
             self.best_score = candidate.score
-            self.total_improvement += improvement
-            self.stagnation_counter = 0
-        else:
+            if count_eval:
+                self.total_improvement += improvement
+                self.stagnation_counter = 0
+        elif count_eval:
             self.stagnation_counter += 1
 
-        self.eval_count += 1
+        if count_eval:
+            self.eval_count += 1
 
         # Evict worst if over capacity
         if len(self.population) > self.max_population:
@@ -189,6 +197,12 @@ class AdaEvolve:
 
         Returns list of best kernels with scores and metadata.
         """
+        if not any(island.population for island in self.islands):
+            raise RuntimeError(
+                "AdaEvolve: no seed kernels loaded — cannot run evolution. "
+                "Populate the seed directory with .cu files before run()."
+            )
+
         os.makedirs(self.output_dir, exist_ok=True)
         print(f"AdaEvolve: {len(self.islands)} islands, budget={self.budget}")
 
@@ -200,6 +214,22 @@ class AdaEvolve:
             # Select parent and mutate
             parent = island.sample()
             child_code = self._mutate(parent.code, island.strategy)
+            if child_code == parent.code:
+                # No-op mutation — do not spend a paid remote evaluation on a
+                # byte-identical child. Count as a no-op iteration and log it.
+                print(
+                    f"  Step {step}: no-op mutation on island {island_idx} "
+                    f"({island.strategy}) — skipping evaluation"
+                )
+                self.log.append({
+                    "step": step,
+                    "island": island_idx,
+                    "strategy": island.strategy,
+                    "score": None,
+                    "noop_mutation": True,
+                    "timestamp": time.time(),
+                })
+                continue
             child = Candidate(
                 code=child_code,
                 generation=parent.generation + 1,
@@ -207,10 +237,28 @@ class AdaEvolve:
                 strategy=island.strategy,
             )
 
-            # Evaluate: stage1 (local compile) → stage2 (remote A100 backend)
+            # Evaluate: stage1 (local compile) → stage2 (remote A100 backend).
+            # A skipped stage1 (no local nvcc) proceeds to stage2 — the remote
+            # harness compiles anyway; only genuine local compile failures gate.
             stage1 = self.evaluator.evaluate_stage1(child_code)
-            if stage1.combined_score > 0:
+            if stage1.stage1_skipped or stage1.combined_score > 0:
                 stage2 = self.evaluator.evaluate_stage2(child_code)
+                if stage2.combined_score is None:
+                    # Infra error — the child was never actually evaluated.
+                    # Do not add it to any island or count it as improvement.
+                    print(
+                        f"  WARNING: step {step} eval infra error — child not "
+                        f"scored, not added to island: {stage2.error}"
+                    )
+                    self.log.append({
+                        "step": step,
+                        "island": island_idx,
+                        "strategy": island.strategy,
+                        "score": None,
+                        "infra_error": stage2.error,
+                        "timestamp": time.time(),
+                    })
+                    continue
                 child.score = stage2.combined_score
                 child.metadata = stage2.metrics
             else:
@@ -305,10 +353,10 @@ class AdaEvolve:
                 ("__global__", "// Strategy: minimize warp divergence\n__global__"),
             ]
         elif strategy == "occupancy_tuning":
-            mutations = [
-                # Try different block sizes
-                ("blockDim.x", "blockDim.x"),  # noop — real mutation needs LLM
-            ]
+            # No regex-level mutation — real block-size tuning needs LLM wiring.
+            # (A ("blockDim.x", "blockDim.x") no-op entry previously lived here
+            # and produced byte-identical children.)
+            mutations = []
 
         mutated = kernel_code
         # Apply first applicable mutation
@@ -347,7 +395,9 @@ class AdaEvolve:
                     strategy=f"broadcast_from_{candidate.strategy}",
                     metadata={"broadcast_from_island": source_island},
                 )
-                island.add(broadcast_candidate)
+                # count_eval=False: the receiving island spent no evaluation,
+                # so its UCB stats (eval_count/total_improvement) must not move.
+                island.add(broadcast_candidate, count_eval=False)
 
     def _log_step(self, step: int, island_idx: int, candidate: Candidate) -> None:
         """Log step for analysis."""

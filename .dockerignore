@@ -1,0 +1,14 @@
+# Keep build context lean — COPY . must not ingest VCS, venvs, or run artifacts.
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+*.so
+outputs/
+wandb/
+.claude/
+archive/
+notebooks/
+.pytest_cache
+.mypy_cache

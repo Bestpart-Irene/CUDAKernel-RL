@@ -17,7 +17,10 @@ Usage:
 import os
 import modal
 
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+# setdefault: on the laptop (unset) this stays 0 to avoid hf_transfer's missing
+# native wheel; inside the Modal container the image's "1" wins so 30B model
+# downloads keep hf_transfer enabled.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 
 TRAIN_GPU = os.getenv("KERNELFORGE_TRAIN_GPU", "H200")
 APP_NAME = os.getenv("KERNELFORGE_TRAIN_APP", "kernelforge-train")
@@ -222,12 +225,49 @@ def _smoke_test() -> dict:
     try:
         from openenv_env.eval_backend import EVAL_BACKEND, dispatch_eval
 
+        # Minimal valid kernel under the unified extern "C" + dlsym contract
+        # (EXP-018a): plain CUDA, no torch headers, `run_kernel` E2 signature.
+        # A pybind/torch-extension payload would be rejected at the evaluator's
+        # source scan (anti_hack.FORBIDDEN_SOURCE_PATTERNS) and fail the gate.
+        # Mirrors the vector_add_e2 row in datasets/combined_kernelforge.jsonl.
+        smoke_cuda_code = """\
+#include <cuda_runtime.h>
+
+__global__ void add_kernel(const float* __restrict__ x,
+                           const float* __restrict__ y,
+                           float* __restrict__ out, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = x[i] + y[i];
+}
+
+extern "C" void run_kernel(const float* x, const float* y, float* out, int n) {
+    int block = 256;
+    int grid = (n + block - 1) / block;
+    add_kernel<<<grid, block>>>(x, y, out, n);
+    cudaDeviceSynchronize();
+}
+"""
+        smoke_task_code = """\
+import torch
+
+
+class Model(torch.nn.Module):
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return x + y
+
+
+def get_inputs():
+    n = 1 << 20
+    torch.manual_seed(0)
+    return [torch.randn(n), torch.randn(n)]
+
+
+def get_init_inputs():
+    return []
+"""
         test_result = dispatch_eval(
             "evaluate_ops6k_kernel",
-            {
-                "cuda_code": '#include <torch/extension.h>\n\ntorch::Tensor run_kernel(torch::Tensor x) {\n    return x * 2;\n}\n\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n    m.def("run_kernel", &run_kernel);\n}',
-                "task_code": 'import torch\nclass Model(torch.nn.Module):\n  def __init__(self): super().__init__()\n  def forward(self, x): return x * 2\ndef get_inputs(): return [torch.randn(256, device="cuda")]\ndef get_init_inputs(): return []',
-            },
+            {"cuda_code": smoke_cuda_code, "task_code": smoke_task_code},
         )
         results["eval"] = {
             "connected": True,

@@ -15,7 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
-from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols
+from openenv_env.anti_hack import extract_cu_flags, scan_source_forbidden
 from openenv_env.eval_backend import dispatch_eval
 from openenv_env.reward import validate_eval_result
 from training.task_support import compute_task_reward
@@ -23,11 +23,17 @@ from training.task_support import compute_task_reward
 
 @dataclass
 class EvaluationResult:
-    """SkyDiscover-compatible evaluation result."""
-    combined_score: float = 0.0
+    """SkyDiscover-compatible evaluation result.
+
+    combined_score is None when the candidate was never actually evaluated
+    (stage2 infra/config failure) — callers must treat that as "not scored",
+    not as a compile failure.
+    """
+    combined_score: float | None = 0.0
     metrics: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    stage1_skipped: bool = False
 
 
 class KernelForgeEvaluator:
@@ -58,7 +64,18 @@ class KernelForgeEvaluator:
         """
         result = EvaluationResult()
 
-        # Check for forbidden symbols in source
+        # Check for forbidden symbols in source — fail fast BEFORE any compile
+        # or paid remote eval. torch::/at::/c10:: delegation is the reward-hack
+        # channel the unified extern "C" contract exists to close.
+        reject_reason = scan_source_forbidden(cuda_code)
+        if reject_reason:
+            result.error = f"Source rejected: {reject_reason}"
+            result.combined_score = compute_task_reward(
+                {"compiles": False, "correct": False, "error": result.error}
+            )
+            result.metrics["compiles"] = False
+            return result
+
         cu_flags = extract_cu_flags(cuda_code)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -95,9 +112,13 @@ class KernelForgeEvaluator:
                 result.metrics["compiles"] = False
                 return result
             except FileNotFoundError:
+                # No nvcc on this host — NOT a candidate failure. Mark the
+                # result as skipped so callers proceed to stage2 (the remote
+                # harness compiles anyway) instead of gating everything out.
                 result.error = "nvcc not found — local compile check skipped"
                 result.combined_score = 0.0
                 result.metrics["compiles"] = "skipped"
+                result.stage1_skipped = True
                 return result
 
         result.combined_score = 0.1  # Compiles but not yet benchmarked
@@ -161,10 +182,13 @@ class KernelForgeEvaluator:
             }
 
         except Exception as e:
-            result.error = f"Eval dispatch failed: {str(e)[:500]}"
-            result.combined_score = compute_task_reward(
-                {"compiles": False, "correct": False, "error": result.error}
-            )
+            # Infra/config failure (unset eval URL, network down, Modal auth) —
+            # NOT a property of the candidate. Score None so callers treat the
+            # child as "not evaluated" instead of a compile-failure reward.
+            result.error = f"Eval dispatch failed (infra error): {str(e)[:500]}"
+            result.combined_score = None
+            result.metrics["infra_error"] = True
+            print(f"ERROR: stage2 eval dispatch failed — candidate NOT scored: {result.error}")
 
         return result
 
@@ -175,10 +199,11 @@ class KernelForgeEvaluator:
 
         Implements cascade: stage1 (compile check) → stage2 (A100 benchmark).
         """
-        # Stage 1: fast compile check
+        # Stage 1: fast compile check. Skipped stage1 (no local nvcc) still
+        # proceeds to stage2 — only genuine local compile failures gate.
         stage1 = self.evaluate_stage1(program_solution)
 
-        if stage1.combined_score <= self.stage1_threshold:
+        if not stage1.stage1_skipped and stage1.combined_score <= self.stage1_threshold:
             stage1.artifacts["stage"] = "compile_fail"
             stage1.artifacts["program_id"] = program_id
             return stage1
@@ -200,9 +225,9 @@ class KernelForgeEvaluator:
         with open(program_path, "r", encoding="utf-8") as f:
             cuda_code = f.read()
 
-        # Stage 1
+        # Stage 1 — skipped stage1 (no local nvcc) still proceeds to stage2
         stage1 = self.evaluate_stage1(cuda_code)
-        if stage1.combined_score <= self.stage1_threshold:
+        if not stage1.stage1_skipped and stage1.combined_score <= self.stage1_threshold:
             return {
                 "combined_score": stage1.combined_score,
                 "artifacts": {**stage1.artifacts, "error": stage1.error},

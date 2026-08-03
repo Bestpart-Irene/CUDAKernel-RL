@@ -15,7 +15,6 @@ import pandas as pd
 import numpy as np
 import time
 import json
-import modal
 import networkx as nx
 from typing import Dict, List, Any
 import sys
@@ -24,7 +23,7 @@ import os
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from verification.pac_verify import generate_test_graphs, verify_wcc
+from verification.pac_verify import generate_test_graphs
 
 try:
     from verification.profile import H100Profiler
@@ -87,7 +86,9 @@ class KernelForgeDemo:
     def setup_session_state(self):
         """Initialize Streamlit session state."""
         if 'current_kernel' not in st.session_state:
-            st.session_state.current_kernel = ""
+            # Seed with the sample kernel so the editor never opens empty
+            # (seeding "" made the get_sample_kernel fallback dead code).
+            st.session_state.current_kernel = self.get_sample_kernel()
         if 'optimization_history' not in st.session_state:
             st.session_state.optimization_history = []
         if 'training_progress' not in st.session_state:
@@ -125,7 +126,7 @@ class KernelForgeDemo:
         graph_size = st.sidebar.slider(
             "Graph Size (vertices)",
             min_value=1000,
-            max_value=100000,
+            max_value=10000,
             value=10000,
             step=1000
         )
@@ -637,15 +638,15 @@ extern "C" {
             st.success("✅ Generated 50 training examples across 5 optimization levels")
     
     def run_pac_verification(self):
-        """Run PAC verification."""
-        with st.spinner("🧪 Running PAC verification..."):
-            # Generate test graphs
+        """Generate PAC test graphs (label verification needs a compiled kernel)."""
+        with st.spinner("🧪 Generating PAC test graphs..."):
             graphs = generate_test_graphs(st.session_state.graph_size)
-            
-            # Simulate verification
-            time.sleep(2)
-            
-            st.success("✅ PAC verification complete! All 5 graphs passed")
+
+            st.success(
+                f"✅ Generated {len(graphs)} test graphs "
+                f"({st.session_state.graph_size:,} vertices each). "
+                "Run a kernel evaluation to verify WCC labels against them."
+            )
     
     def profile_baselines(self):
         """Profile baseline implementations."""
@@ -669,9 +670,23 @@ extern "C" {
 
 
 def main():
-    """Main entry point."""
-    demo = KernelForgeDemo()
-    demo.run()
+    """Main entry point.
+
+    Inside a Streamlit server, render the app. Invoked in bare mode (the
+    kernelforge-demo console script or `python demo/streamlit_demo.py`),
+    re-exec under `streamlit run` so the app actually serves instead of
+    exiting immediately.
+    """
+    from streamlit import runtime
+
+    if runtime.exists():
+        demo = KernelForgeDemo()
+        demo.run()
+    else:
+        os.execvp(
+            sys.executable,
+            [sys.executable, "-m", "streamlit", "run", os.path.abspath(__file__)],
+        )
 
 
 if __name__ == "__main__":

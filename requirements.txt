@@ -2,13 +2,13 @@
 #
 # INSTALL ORDER (on Linux + CUDA):
 #   1. pip install --no-deps unsloth unsloth_zoo   # bypass stale trl<=0.24.0 cap
-#   2. pip install "trl[vllm]>=0.29.0"             # pulls torch, vllm, transformers, accelerate
+#   2. pip install "trl[vllm]==0.29.0"             # pulls torch, vllm, transformers, accelerate
 #   3. pip install -r requirements.txt             # everything else
 #
 # unsloth 2026.3.3 with --no-deps + PatchFastRL("GRPO", FastLanguageModel)
 # See: https://github.com/unslothai/unsloth/releases/tag/December-2025
-trl[vllm]>=0.29.0; platform_system == "Linux"   # Full GRPO + vLLM stack on B200/A100 Linux
-trl>=0.29.0; platform_system != "Linux"         # Control-plane install for macOS preflight
+trl[vllm]==0.29.0; platform_system == "Linux"   # Full GRPO + vLLM stack on B200/A100 Linux (pinned to match pyproject)
+trl==0.29.0; platform_system != "Linux"         # Control-plane install for macOS preflight (pinned to match pyproject)
 transformers>=4.56.2,!=5.0.0,!=5.1.0  # Per trl 0.29.0 + unsloth exclusions
 datasets>=3.0
 accelerate>=1.4.0             # Required by trl 0.29.0
@@ -19,7 +19,6 @@ torch>=2.6.0; platform_system != "Linux"
 
 # OpenEnv
 openenv-core[core]>=0.2.1  # NOT "openenv" (that's an unrelated 2020 package)
-gymnasium>=1.0
 fastapi>=0.104.0
 uvicorn>=0.24.0
 

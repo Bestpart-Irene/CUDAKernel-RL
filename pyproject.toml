@@ -82,6 +82,7 @@ dev = [
     "flake8>=6.1.0",
     "mypy>=1.6.0",
     "pre-commit>=3.5.0",
+    "jupyter>=1.0.0",  # docker-compose jupyter service runs `python -m jupyter notebook`
 ]
 docs = [
     "mkdocs>=1.5.0",
@@ -113,6 +114,7 @@ dev-dependencies = [
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.4.0",
     "mkdocstrings[python]>=0.23.0",
+    "jupyter>=1.0.0",
 ]
 
 [project.urls]
@@ -138,8 +140,10 @@ include = [
     "eval_service*",
 ]
 
+# "*" applies to every discovered package (there is no package named
+# "kernelforge" — the old key silently matched nothing).
 [tool.setuptools.package-data]
-kernelforge = [
+"*" = [
     "*.md",
     "*.txt",
     "*.json",
@@ -239,24 +243,4 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
-]
-
-[tool.flake8]
-max-line-length = 100
-extend-ignore = [
-    "E203",  # whitespace before ':'
-    "E501",  # line too long
-    "W503",  # line break before binary operator
-]
-exclude = [
-    ".git",
-    "__pycache__",
-    "build",
-    "dist",
-    ".eggs",
-    "*.egg-info",
-    ".venv",
-    ".tox",
-    "outputs",
-    "datasets",
 ]

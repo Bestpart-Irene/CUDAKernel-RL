@@ -71,7 +71,7 @@ def test_gpu_features() -> dict | None:
 
     print(f"\nTesting GPU features on {TARGET_GPU}...")
     try:
-        fn = modal.Function.from_name(APP_NAME, "test_h100_features")
+        fn = modal.Function.from_name(APP_NAME, "test_gpu_features")
         result = fn.remote()
         print(f"  Device: {result.get('device_name', 'unknown')}")
         print(f"  Compute capability: {result.get('compute_capability', 'unknown')}")

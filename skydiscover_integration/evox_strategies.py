@@ -166,6 +166,10 @@ class EvoXStrategyManager:
         self.scorer = LogWindowScorer(window=window)
         self.stagnation_threshold = stagnation_threshold
         self.evolution_count = 0
+        # Instance-local copy of the shared prompt registry. evolve_strategy
+        # registers hybrids HERE — mutating the module-level
+        # adaevolve.STRATEGY_PROMPTS would leak state across manager instances.
+        self.strategy_prompts: dict[str, str] = dict(_get_strategy_prompts())
 
     @property
     def active_strategies(self) -> list[str]:
@@ -274,9 +278,8 @@ class EvoXStrategyManager:
         else:
             # Generate a generic hybrid prompt
             hybrid_name = f"hybrid_{self.evolution_count}"
-            prompts = _get_strategy_prompts()
-            prompt_a = prompts.get(stagnant_strategy, "")
-            prompt_b = prompts.get(best_name, "")
+            prompt_a = self.strategy_prompts.get(stagnant_strategy, "")
+            prompt_b = self.strategy_prompts.get(best_name, "")
             hybrid_prompt = (
                 f"Combine two optimization strategies:\n\n"
                 f"Strategy A ({stagnant_strategy}):\n{prompt_a}\n\n"
@@ -284,9 +287,9 @@ class EvoXStrategyManager:
                 f"Apply BOTH sets of optimizations to the kernel."
             )
 
-        # Register hybrid strategy in the shared prompt registry
-        prompts = _get_strategy_prompts()
-        prompts[hybrid_name] = hybrid_prompt
+        # Register hybrid strategy in this instance's prompt registry (never
+        # the module-level adaevolve.STRATEGY_PROMPTS — cross-instance leak).
+        self.strategy_prompts[hybrid_name] = hybrid_prompt
         self.states[hybrid_name] = StrategyState(name=hybrid_name)
 
         # Deactivate stagnant strategy

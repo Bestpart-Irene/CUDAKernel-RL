@@ -11,6 +11,13 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - ./outputs:/app/outputs
       - ./datasets:/app/datasets
@@ -83,7 +90,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=kernelforge
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-kernelforge}
     volumes:
       - grafana-storage:/var/lib/grafana
       - ./monitoring/grafana:/etc/grafana/provisioning

@@ -12,6 +12,18 @@ from typing import Any
 
 from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols
 
+# Forward target-hardware knobs from the deployer's shell into the eval image.
+# Without this, `modal deploy` containers start clean and silently fall back
+# to the sm_80/A100 defaults below — deploying with KERNELFORGE_CUDA_ARCH=sm_90a
+# would still yield containers compiling sm_80. Same hazard modal_train.py
+# documents for KERNELFORGE_*; image env is content-addressed, so distinct
+# value combos cache distinct image revisions.
+_KERNELFORGE_ENV_PASSTHROUGH = {
+    k: v
+    for k, v in os.environ.items()
+    if k in ("KERNELFORGE_CUDA_ARCH", "KERNELFORGE_TARGET_GPU", "KERNELFORGE_TARGET_ARCH")
+}
+
 # CUDA 12.4 Docker image with Ampere/Hopper support
 cuda_image = (
     modal.Image.from_registry(
@@ -28,6 +40,7 @@ cuda_image = (
         "pydantic>=2.0",
         "openenv-core[core]>=0.2.1",
     )
+    .env(_KERNELFORGE_ENV_PASSTHROUGH)
     # Python packages → add_local_python_source (auto-added to PYTHONPATH at /root)
     .add_local_python_source("verification", "openenv_env", "eval_service")
     # Non-Python CUDA sources → add_local_dir
@@ -63,8 +76,13 @@ def profile_baselines() -> dict:
 
 
 @app.function(gpu=TARGET_GPU, image=cuda_image, timeout=60, include_source=True)
-def test_h100_features() -> dict:
-    """Test target GPU feature availability."""
+def test_gpu_features() -> dict:
+    """Test target GPU feature availability.
+
+    Named to match the eval_backend dispatch table and the HTTP service route
+    (both use "test_gpu_features") — the old "test_h100_features" deploy name
+    broke Function.from_name lookups.
+    """
     from eval_service.eval_core import test_gpu_features_impl
     return test_gpu_features_impl()
 
@@ -96,12 +114,13 @@ def evaluate_ops6k_kernel(payload: dict) -> dict:
 
 
 if __name__ == "__main__":
-    # Test Modal functions locally
+    # Test Modal functions locally — Function objects must be called via
+    # .remote() (direct __call__ is a TypeError under modal >= 1.x).
     with app.run():
         print("Testing GPU features...")
-        result = test_h100_features()
+        result = test_gpu_features.remote()
         print(f"GPU features: {result}")
 
         print("\nTesting baseline profiling...")
-        baselines = profile_baselines()
+        baselines = profile_baselines.remote()
         print(f"Baselines: {baselines}")
