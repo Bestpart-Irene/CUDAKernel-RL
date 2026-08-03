@@ -63,6 +63,12 @@ def _build_cuda_prompt(example: dict[str, Any], max_code_chars: int = 6000) -> s
     ops_desc = ", ".join(ops) if ops else "unknown operator pipeline"
     data_source = str(example.get("data_source", "unknown"))
 
+    # EXP-018d: infer the signature class BEFORE truncation (truncated code
+    # may not parse) and emit the same extern-C contract the evaluator grades.
+    from training.task_support import infer_signature_class, ops6k_contract_text
+
+    sig_class = infer_signature_class(code) or "E1"
+
     if len(code) > max_code_chars:
         code = code[:max_code_chars] + "\n# [truncated]"
 
@@ -75,13 +81,7 @@ def _build_cuda_prompt(example: dict[str, Any], max_code_chars: int = 6000) -> s
         "```python\n"
         f"{code}\n"
         "```\n\n"
-        "Return a single CUDA/C++ source file only.\n"
-        "The source must:\n"
-        "- include `#include <torch/extension.h>`\n"
-        "- define a callable `run_kernel(...)` entrypoint\n"
-        "- export `run_kernel` via `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`\n"
-        "- accept the tensors returned by `get_inputs()` and return outputs matching `Model(*inputs)`\n"
-        "- include a `// CU_FLAGS:` comment if extra nvcc flags are required\n"
+        f"{ops6k_contract_text(sig_class)}\n"
         "Do not return prose or Python wrappers."
     )
 

@@ -165,6 +165,100 @@ def build_prompt_lookup(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return lookup
 
 
+def infer_signature_class(task_code: str) -> str | None:
+    """Infer the extern-C signature class the evaluator will use for a task.
+
+    Mirrors ``eval_service.eval_core._infer_extern_c_signature`` (1 input
+    tensor -> E1, 2 -> E2, anything else -> None). Falls back to AST analysis
+    of ``get_inputs()``'s return statement when torch is unavailable or the
+    task code cannot execute on this host (e.g. CPU-only box, `.cuda()` inputs).
+    """
+    if not task_code:
+        return None
+    try:
+        import torch
+    except Exception:
+        return _infer_signature_class_static(task_code)
+    try:
+        ns: dict[str, Any] = {}
+        exec(task_code, ns)  # trusted dataset code; the evaluator execs it too
+        get_inputs = ns.get("get_inputs")
+        if get_inputs is None:
+            return None
+        sample = get_inputs()
+        if not isinstance(sample, (list, tuple)):
+            sample = [sample]
+        count = sum(1 for x in sample if isinstance(x, torch.Tensor))
+    except Exception:
+        return _infer_signature_class_static(task_code)
+    return {1: "E1", 2: "E2"}.get(count)
+
+
+def _infer_signature_class_static(task_code: str) -> str | None:
+    """Torch-free fallback: count elements of get_inputs()'s return literal."""
+    try:
+        tree = ast.parse(task_code)
+    except SyntaxError:
+        return None
+    fn = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "get_inputs"
+        ),
+        None,
+    )
+    if fn is None:
+        return None
+    returns = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Return) and node.value is not None
+    ]
+    if not returns:
+        return None
+    value = returns[-1].value
+    count = len(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else 1
+    return {1: "E1", 2: "E2"}.get(count)
+
+
+def ops6k_contract_text(sig_class: str) -> str:
+    """Single source of truth for the EXP-018a unified extern "C" contract."""
+    if sig_class == "E2":
+        sig_line = (
+            'extern "C" void run_kernel(const float* x, const float* y, '
+            "float* out, int n)"
+        )
+        arg_desc = (
+            "  `x` and `y` are device pointers to the two input tensors flattened to 1D.\n"
+            "  `out` is a pre-allocated device pointer for the output (same total element "
+            "count as the reference output).\n"
+            "  `n` is the total element count."
+        )
+    else:  # E1 default
+        sig_line = 'extern "C" void run_kernel(const float* x, float* out, int n)'
+        arg_desc = (
+            "  `x` is a device pointer to the input tensor flattened to 1D.\n"
+            "  `out` is a pre-allocated device pointer for the output (same total element "
+            "count as the reference output).\n"
+            "  `n` is the total element count."
+        )
+    return (
+        "Evaluation contract (EXP-018a unified extern \"C\"):\n"
+        "- Produce a single raw CUDA source file. Do NOT include "
+        "`<torch/extension.h>`, `<ATen/...>`, or `<c10/...>`. Do NOT "
+        "reference `torch::`, `at::`, or `c10::` in any form.\n"
+        f"- Export `{sig_line}`.\n"
+        f"{arg_desc}\n"
+        "- The function must launch your `__global__` CUDA kernel and "
+        "cudaDeviceSynchronize before returning.\n"
+        "- Output values must match the reference `Model(*get_inputs())` "
+        "result element-wise to within rtol=1e-3, atol=1e-3.\n"
+        "- Return CUDA/C++ code only.\n"
+        "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
+    )
+
+
 def task_interface_contract(row: dict[str, Any]) -> str:
     """Return the evaluator contract that the model must satisfy."""
     backend = normalize_task_row(row)["evaluation_backend"]
@@ -178,40 +272,13 @@ def task_interface_contract(row: dict[str, Any]) -> str:
             "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
         )
     if backend == "ops6k":
-        sig = (row.get("extern_c_signature") or {}).get("class", "E1")
-        if sig == "E2":
-            sig_line = (
-                'extern "C" void run_kernel(const float* x, const float* y, '
-                "float* out, int n)"
-            )
-            arg_desc = (
-                "  `x` and `y` are device pointers to the two input tensors flattened to 1D.\n"
-                "  `out` is a pre-allocated device pointer for the output (same total element "
-                "count as the reference output).\n"
-                "  `n` is the total element count."
-            )
-        else:  # E1 default
-            sig_line = 'extern "C" void run_kernel(const float* x, float* out, int n)'
-            arg_desc = (
-                "  `x` is a device pointer to the input tensor flattened to 1D.\n"
-                "  `out` is a pre-allocated device pointer for the output (same total element "
-                "count as the reference output).\n"
-                "  `n` is the total element count."
-            )
-        return (
-            "Evaluation contract (EXP-018a unified extern \"C\"):\n"
-            "- Produce a single raw CUDA source file. Do NOT include "
-            "`<torch/extension.h>`, `<ATen/...>`, or `<c10/...>`. Do NOT "
-            "reference `torch::`, `at::`, or `c10::` in any form.\n"
-            f"- Export `{sig_line}`.\n"
-            f"{arg_desc}\n"
-            "- The function must launch your `__global__` CUDA kernel and "
-            "cudaDeviceSynchronize before returning.\n"
-            "- Output values must match the reference `Model(*get_inputs())` "
-            "result element-wise to within rtol=1e-3, atol=1e-3.\n"
-            "- Return CUDA/C++ code only.\n"
-            "- If extra nvcc flags are required, add a `// CU_FLAGS:` comment."
-        )
+        sig = (row.get("extern_c_signature") or {}).get("class")
+        if not sig:
+            # EXP-018d: the dataset no longer carries extern_c_signature
+            # (dropped in 51eb7c9), so infer the class the evaluator itself
+            # will infer from get_inputs(); E1 only as a last resort.
+            sig = infer_signature_class(row.get("task_code") or "") or "E1"
+        return ops6k_contract_text(sig)
     return (
         "This task currently has no live evaluator in KernelForge. "
         "Do not use it for RL training until a correctness/runtime harness exists."
@@ -225,11 +292,15 @@ def build_generation_prompt(
 ) -> str:
     """Compose the actual prompt shown to the policy for a task row."""
     row = normalize_task_row(task_row)
+    contract = task_interface_contract(row)
+    if contract and contract in row["prompt"]:
+        # EXP-018d dataset prompts already embed the contract — don't repeat it.
+        contract = ""
     parts = [
         skill_context.strip(),
         row["prompt"],
         topology_context.strip(),
-        task_interface_contract(row),
+        contract,
     ]
     return "\n\n---\n\n".join(part for part in parts if part)
 
