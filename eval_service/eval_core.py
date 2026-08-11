@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -24,6 +25,25 @@ TARGET_CUDA_ARCH = os.getenv(
 )
 BASELINE_KERNEL = os.getenv("KERNELFORGE_BASELINE_KERNEL", "baseline_wcc.cu")
 SECONDARY_BASELINE_KERNEL = os.getenv("KERNELFORGE_SECONDARY_BASELINE_KERNEL", "")
+
+
+@lru_cache(maxsize=1)
+def evaluator_sha() -> str:
+    """First 12 hex chars of sha256 over the evaluator source files.
+
+    Versioned-freeze policy (2026-08-10 audit, finding 5): the evaluator is
+    frozen except when the change is recorded — every eval result dict carries
+    `evaluator_sha` so a results row can be pinned to the exact evaluator
+    state that produced it. Covers eval_core.py + anti_hack.py, the two files
+    that define evaluation semantics.
+    """
+    from openenv_env import anti_hack as _anti_hack
+
+    digest = hashlib.sha256()
+    for path in (os.path.abspath(__file__), os.path.abspath(_anti_hack.__file__)):
+        with open(path, "rb") as f:
+            digest.update(f.read())
+    return digest.hexdigest()[:12]
 
 
 # --- Helper functions ---
@@ -79,7 +99,11 @@ def _nvcc_command(
     cmd = ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "--extended-lambda", "-O3", src_path, "-o", output_path]
     if shared:
         cmd.extend(["--shared", "-Xcompiler", "-fPIC"])
-    cmd.extend(extra_flags or ["--use_fast_math"])
+    # 2026-08-10 audit finding 2 (precision/tolerance gaming): --use_fast_math
+    # is no longer appended by default. Candidates may still opt in explicitly
+    # via `// CU_FLAGS: --use_fast_math` (whitelisted in anti_hack.py).
+    if extra_flags:
+        cmd.extend(extra_flags)
     return cmd
 
 
@@ -188,6 +212,39 @@ def _module_name(prefix: str, payload: str) -> str:
     return f"{prefix}_{digest}"
 
 
+def _guarded_speedup(baseline_ms, kernel_ms) -> float | None:
+    """Speedup guard at source (2026-08-10 audit finding 2).
+
+    Returns baseline/kernel only when both times are finite and > 0;
+    otherwise None. Guarantees inf/NaN never reach the reward path
+    (validate_eval_result coerces None to 0.0 downstream).
+    """
+    try:
+        baseline = float(baseline_ms)
+        kernel = float(kernel_ms)
+    except (TypeError, ValueError):
+        return None
+    if not (np.isfinite(baseline) and np.isfinite(kernel)):
+        return None
+    if baseline <= 0.0 or kernel <= 0.0:
+        return None
+    return baseline / kernel
+
+
+def _parse_compute_capability(cc) -> tuple[int, int]:
+    """Parse cupy's concatenated compute-capability string into (major, minor).
+
+    cupy returns major and minor glued together with the minor as the LAST
+    digit: "80" -> (8, 0), "90" -> (9, 0), "100" -> (10, 0) on B200 sm_100.
+    The old `int(str(cc)[:1])` parsed sm_100 as major 1, disabling every
+    Hopper/Blackwell feature gate on Blackwell hardware.
+    """
+    cc_str = str(cc)
+    if len(cc_str) < 2:
+        return int(cc_str), 0
+    return int(cc_str[:-1]), int(cc_str[-1])
+
+
 def edges_to_csr(edges, num_vertices):
     """Convert edge list to CSR format."""
     adj = [[] for _ in range(num_vertices)]
@@ -252,8 +309,12 @@ def _benchmark_kernel_source(
         for _ in range(benchmark_runs):
             start = cp.cuda.Event()
             end = cp.cuda.Event()
+            # Device-wide sync before each timestamp — keeps baseline timing
+            # methodology identical to the candidate loop (audit finding 2).
+            cp.cuda.Device(0).synchronize()
             start.record()
             run_kernel_verification(lib_path, edges, n_verts)
+            cp.cuda.Device(0).synchronize()
             end.record()
             end.synchronize()
             times.append(cp.cuda.get_elapsed_time(start, end))
@@ -331,6 +392,7 @@ def evaluate_kernel_impl(payload: dict) -> dict:
         "compiles": False, "correct": False, "verifier_msg": "",
         "runtime_ms": 0.0, "runtime_stats": {},
         "speedup_vs_orig": 0.0, "speedup_vs_dg": 0.0, "error": "",
+        "evaluator_sha": evaluator_sha(),
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -403,8 +465,12 @@ def evaluate_kernel_impl(payload: dict) -> dict:
                 for _ in range(runs):
                     start = cp.cuda.Event()
                     end = cp.cuda.Event()
+                    # Device-wide sync before each timestamp so side-stream
+                    # work cannot escape the timed region (CUDA-L1 exploit).
+                    cp.cuda.Device(0).synchronize()
                     start.record()
                     run_kernel_verification(lib_path, edges, n_verts)
+                    cp.cuda.Device(0).synchronize()
                     end.record()
                     end.synchronize()
                     times.append(cp.cuda.get_elapsed_time(start, end))
@@ -419,10 +485,14 @@ def evaluate_kernel_impl(payload: dict) -> dict:
                     "max": float(np.max(times)),
                 }
 
-                if baseline_orig_ms and result["runtime_ms"] > 0:
-                    result["speedup_vs_orig"] = float(baseline_orig_ms) / result["runtime_ms"]
-                if baseline_dg_ms and result["runtime_ms"] > 0:
-                    result["speedup_vs_dg"] = float(baseline_dg_ms) / result["runtime_ms"]
+                if baseline_orig_ms is not None:
+                    result["speedup_vs_orig"] = _guarded_speedup(
+                        baseline_orig_ms, result["runtime_ms"]
+                    )
+                if baseline_dg_ms is not None:
+                    result["speedup_vs_dg"] = _guarded_speedup(
+                        baseline_dg_ms, result["runtime_ms"]
+                    )
             except Exception as e:
                 result["error"] = f"Benchmark exception: {str(e)[:500]}"
 
@@ -432,7 +502,8 @@ def evaluate_kernel_impl(payload: dict) -> dict:
                 "nvcc", f"-arch={TARGET_CUDA_ARCH}", "-O3",
                 "--ptxas-options=-v", "-c", src_path, "-o", "/dev/null",
             ]
-            ptxas_cmd.extend(extract_cu_flags(cuda_code) or ["--use_fast_math"])
+            # Mirror _nvcc_command: no default --use_fast_math (audit finding 2).
+            ptxas_cmd.extend(extract_cu_flags(cuda_code))
             ptxas_proc = subprocess.run(
                 ptxas_cmd,
                 capture_output=True, text=True, timeout=15,
@@ -529,8 +600,9 @@ def test_gpu_features_impl() -> dict:
 
         device = cp.cuda.Device(0)
         cc = device.compute_capability
-        major = int(str(cc)[:1])
-        compute_cap = f"{major}.{str(cc)[1:]}" if len(str(cc)) > 1 else str(cc)
+        # B200 fix: cc "100" means sm_100 -> major 10, NOT major 1.
+        major, minor = _parse_compute_capability(cc)
+        compute_cap = f"{major}.{minor}"
 
         tma_available = major >= 9
         dsmem_available = major >= 9
@@ -581,6 +653,7 @@ def evaluate_kernels_batch_impl(payloads: list[dict]) -> list[dict]:
                 "runtime_ms": 0.0, "runtime_stats": {},
                 "speedup_vs_orig": 0.0, "speedup_vs_dg": 0.0,
                 "error": f"Batch eval exception: {str(e)[:500]}",
+                "evaluator_sha": evaluator_sha(),
             })
     return results
 
@@ -632,6 +705,60 @@ def _invoke_candidate(run_kernel_fn, sig_class: str, tensor_inputs: list, out_bu
         raise NotImplementedError(f"Signature class {sig_class} not yet wired")
 
 
+def _run_anti_hack_checks(
+    result: dict,
+    candidate_outputs: list,
+    ref_outputs: list,
+    inputs_list: list,
+) -> bool:
+    """Apply the runtime anti-hack checks to `result` in place.
+
+    Returns True when every check passes. A failed check — OR an exception
+    raised inside a check — marks the result correct=False /
+    hack_suspected=True with the reason recorded. 2026-08-10 audit finding 2:
+    these used to be wrapped in `except Exception: pass`, so a crash inside a
+    check silently passed the candidate. A check that cannot run is a failed
+    check.
+    """
+    def _flag(reason: str) -> None:
+        result["correct"] = False
+        result["hack_suspected"] = True
+        result["error"] = reason
+        result["verifier_msg"] = reason
+
+    try:
+        from openenv_env.anti_hack import (
+            check_not_passthrough,
+            check_output_not_constant,
+            check_shapes_match,
+        )
+
+        if ref_outputs:
+            passed, reason = check_shapes_match(candidate_outputs[0], ref_outputs[0])
+            if not passed:
+                _flag(f"Anti-hack: {reason}")
+                return False
+
+        if len(candidate_outputs) >= 2:
+            passed, reason = check_output_not_constant(
+                candidate_outputs[0], candidate_outputs[1]
+            )
+            if not passed:
+                _flag(f"Anti-hack: {reason}")
+                return False
+
+        if inputs_list:
+            passed, reason = check_not_passthrough(candidate_outputs[0], inputs_list[0])
+            if not passed:
+                _flag(f"Anti-hack: {reason}")
+                return False
+    except Exception as exc:
+        _flag(f"Anti-hack check raised: {str(exc)[:500]}")
+        return False
+
+    return True
+
+
 def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
     """
     Evaluate a CUDA kernel against a PyTorch reference under the unified
@@ -648,17 +775,33 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
     Model class; this is only used to produce expected outputs and timing
     baselines, never inside the candidate call path.
 
+    Reference isolation (2026-08-10 audit finding 2): ALL reference outputs
+    and PyTorch baselines are computed BEFORE the candidate .so is dlopen'd.
+    References are copied to CPU, the GPU copies freed, and the caching
+    allocator emptied, so no live reference buffer exists on-device while
+    candidate code runs — closing the same-context cudaMemcpy scraping
+    channel. After the timing loop, ONE extra candidate call on a fresh
+    input from a non-deterministic (os.urandom) seed is re-verified against
+    a CPU-computed reference — closing the stateful-timing (call-count
+    switch) and fixed-input constant-folding channels.
+
     Input payload:
         cuda_code: str
         task_code: str
         warmup_iters: int (default 10)
         benchmark_runs: int (default 10)
         extern_c_signature: dict | None  (optional; inferred from task if absent)
+
+    Result schema additions (2026-08-10 hardening):
+        hack_suspected: bool  - True when an anti-hack check fails/raises or
+                                the timed-output re-verification mismatches
+        evaluator_sha: str    - sha256[:12] over eval_core.py + anti_hack.py
+        speedup_vs_orig / speedup_vs_dg become None (not 0.0) when a measured
+        time is non-finite/<=0 or the re-verification fails.
     """
     import ctypes
     import importlib.util
     import sys
-    import torch
 
     cuda_code = payload.get("cuda_code", "")
     task_code = payload.get("task_code", "")
@@ -677,6 +820,8 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
         "speedup_vs_dg": 0.0,
         "verifier_msg": "",
         "error": "",
+        "hack_suspected": False,
+        "evaluator_sha": evaluator_sha(),
     }
 
     if not cuda_code or not task_code:
@@ -708,6 +853,10 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
         )
         return result
     sig_class = extern_c_signature.get("class")
+
+    # Imported here (not at function top) so the cheap payload-validation
+    # early returns above stay runnable on torch-less machines (unit tests).
+    import torch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         model_path = os.path.join(tmpdir, "model.py")
@@ -771,7 +920,107 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             result["error"] = f"Reference model load failed: {str(exc)[:500]}"
             return result
 
-        # === Step 7: dlopen + dlsym candidate ===
+        # === Step 7: ALL reference outputs BEFORE the candidate .so loads ===
+        # 2026-08-10 audit finding 2 (reference scraping): ref and candidate
+        # used to share the CUDA context with the ref buffer live at a
+        # predictable allocator offset while candidate host code ran. Refs
+        # are computed now, copied to CPU, and the GPU copies freed before
+        # dlopen. Seeds stay deterministic (42+seed) for reproducibility.
+        correctness_refs_cpu: list = []
+        try:
+            for seed in range(5):
+                torch.manual_seed(42 + seed)
+                test_inputs = ref_mod.get_inputs()
+                if not isinstance(test_inputs, (list, tuple)):
+                    test_inputs = [test_inputs]
+                test_inputs = _move_to_cuda(test_inputs, torch)
+                with torch.no_grad():
+                    ref_output = ref_model(*test_inputs)
+                correctness_refs_cpu.append(ref_output.contiguous().float().cpu())
+                del ref_output, test_inputs
+        except Exception as exc:
+            result["error"] = f"Reference computation failed: {str(exc)[:500]}"
+            result["verifier_msg"] = result["error"]
+            return result
+
+        # === Step 8: PyTorch baselines — also BEFORE dlopen ===
+        # Timing ref_model after the candidate loads would re-open the
+        # scraping channel via freshly materialized reference outputs, so
+        # baselines run up front even though the candidate may yet prove
+        # incorrect. Baseline failure records an error but does not void
+        # correctness (matches the old Step-10 semantics).
+        timing_ok = True
+        eager_ms = 0.0
+        compile_ms = 0.0
+        bench_ref_cpu = None
+        bench_inputs = None
+        compiled_model = None
+        try:
+            torch.manual_seed(42)
+            bench_inputs = ref_mod.get_inputs()
+            if not isinstance(bench_inputs, (list, tuple)):
+                bench_inputs = [bench_inputs]
+            bench_inputs = _move_to_cuda(bench_inputs, torch)
+            with torch.no_grad():
+                bench_ref_cpu = ref_model(*bench_inputs).contiguous().float().cpu()
+
+            for _ in range(warmup_iters):
+                with torch.no_grad():
+                    ref_model(*bench_inputs)
+            torch.cuda.synchronize()
+
+            eager_times = []
+            for _ in range(benchmark_runs):
+                start_evt = torch.cuda.Event(enable_timing=True)
+                end_evt = torch.cuda.Event(enable_timing=True)
+                # Device-wide sync before each timestamp so side-stream work
+                # cannot escape the timed region (CUDA-L1 exploit class).
+                torch.cuda.synchronize()
+                start_evt.record()
+                with torch.no_grad():
+                    ref_model(*bench_inputs)
+                torch.cuda.synchronize()
+                end_evt.record()
+                end_evt.synchronize()
+                eager_times.append(start_evt.elapsed_time(end_evt))
+            eager_ms = float(np.median(eager_times))
+            result["baseline_eager_ms"] = eager_ms
+
+            try:
+                compiled_model = torch.compile(ref_model)
+                for _ in range(warmup_iters):
+                    with torch.no_grad():
+                        compiled_model(*bench_inputs)
+                torch.cuda.synchronize()
+
+                compile_times = []
+                for _ in range(benchmark_runs):
+                    start_evt = torch.cuda.Event(enable_timing=True)
+                    end_evt = torch.cuda.Event(enable_timing=True)
+                    torch.cuda.synchronize()
+                    start_evt.record()
+                    with torch.no_grad():
+                        compiled_model(*bench_inputs)
+                    torch.cuda.synchronize()
+                    end_evt.record()
+                    end_evt.synchronize()
+                    compile_times.append(start_evt.elapsed_time(end_evt))
+                compile_ms = float(np.median(compile_times))
+            except Exception:
+                compile_ms = 0.0
+            result["baseline_compile_ms"] = compile_ms
+        except Exception as exc:
+            timing_ok = False
+            result["error"] = f"Profiling failed: {str(exc)[:500]}"
+        finally:
+            # Free every GPU handle from the reference phase and purge the
+            # caching allocator: no live (or cached) reference block may
+            # remain on-device when the candidate library enters the process.
+            bench_inputs = None
+            compiled_model = None
+            torch.cuda.empty_cache()
+
+        # === Step 9: dlopen + dlsym candidate (refs are now CPU-only) ===
         try:
             lib = ctypes.CDLL(so_path)
             run_kernel = lib.run_kernel
@@ -782,7 +1031,10 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             result["verifier_msg"] = result["error"]
             return result
 
-        # === Step 8: correctness via candidate calls across 5 seeds ===
+        # === Step 10: correctness via candidate calls across 5 seeds ===
+        # Inputs are regenerated bit-identically (same manual_seed stream as
+        # Step 7); comparison happens on a CPU copy of the candidate output
+        # against the precomputed CPU reference.
         anti_hack_candidate_outputs = []
         anti_hack_ref_outputs = []
         anti_hack_inputs = []
@@ -799,20 +1051,20 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                     t.contiguous().float() for t in test_inputs if isinstance(t, torch.Tensor)
                 ]
 
-                with torch.no_grad():
-                    ref_output = ref_model(*test_inputs)
-                ref_output_f = ref_output.contiguous().float()
-
-                candidate_output = torch.empty_like(ref_output_f)
+                ref_cpu = correctness_refs_cpu[seed]
+                candidate_output = torch.empty(
+                    ref_cpu.shape, dtype=torch.float32, device="cuda"
+                )
                 _invoke_candidate(run_kernel, sig_class, tensor_inputs, candidate_output)
                 torch.cuda.synchronize()
 
-                _assert_close(candidate_output, ref_output_f, torch)
+                candidate_cpu = candidate_output.cpu()
+                _assert_close(candidate_cpu, ref_cpu, torch)
 
                 if seed < 2:
-                    anti_hack_candidate_outputs.append(_clone_value(candidate_output))
-                    anti_hack_ref_outputs.append(_clone_value(ref_output_f))
-                    anti_hack_inputs.append(_clone_value(tensor_inputs))
+                    anti_hack_candidate_outputs.append(candidate_cpu)
+                    anti_hack_ref_outputs.append(ref_cpu)
+                    anti_hack_inputs.append([t.cpu() for t in tensor_inputs])
 
             result["correct"] = True
             result["verifier_msg"] = "Outputs matched reference for 5 random seeds"
@@ -821,147 +1073,113 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             result["verifier_msg"] = result["error"]
             return result
 
-        # === Step 9: anti-hack runtime checks ===
-        try:
-            from openenv_env.anti_hack import (
-                check_not_passthrough,
-                check_output_not_constant,
-                check_shapes_match,
-            )
+        # === Step 11: anti-hack runtime checks (no silent pass) ===
+        if not _run_anti_hack_checks(
+            result, anti_hack_candidate_outputs, anti_hack_ref_outputs, anti_hack_inputs
+        ):
+            return result
 
-            if anti_hack_ref_outputs:
-                passed, reason = check_shapes_match(
-                    anti_hack_candidate_outputs[0], anti_hack_ref_outputs[0]
-                )
-                if not passed:
-                    result["correct"] = False
-                    result["error"] = f"Anti-hack: {reason}"
-                    result["verifier_msg"] = result["error"]
-                    return result
-
-            if len(anti_hack_candidate_outputs) >= 2:
-                passed, reason = check_output_not_constant(
-                    anti_hack_candidate_outputs[0], anti_hack_candidate_outputs[1]
-                )
-                if not passed:
-                    result["correct"] = False
-                    result["error"] = f"Anti-hack: {reason}"
-                    result["verifier_msg"] = result["error"]
-                    return result
-
-            if anti_hack_inputs:
-                passed, reason = check_not_passthrough(
-                    anti_hack_candidate_outputs[0], anti_hack_inputs[0]
-                )
-                if not passed:
-                    result["correct"] = False
-                    result["error"] = f"Anti-hack: {reason}"
-                    result["verifier_msg"] = result["error"]
-                    return result
-        except Exception:
-            pass  # Anti-hack is best-effort
-
-        # === Step 10: timing — candidate runs via dlsym, baselines via PyTorch ===
-        try:
-            torch.manual_seed(42)
-            bench_inputs = ref_mod.get_inputs()
-            if not isinstance(bench_inputs, (list, tuple)):
-                bench_inputs = [bench_inputs]
-            bench_inputs = _move_to_cuda(bench_inputs, torch)
-            bench_tensor_inputs = [
-                t.contiguous().float() for t in bench_inputs if isinstance(t, torch.Tensor)
-            ]
-            with torch.no_grad():
-                ref_out_bench = ref_model(*bench_inputs).contiguous().float()
-            bench_out_buf = torch.empty_like(ref_out_bench)
-
-            for _ in range(warmup_iters):
-                with torch.no_grad():
-                    ref_model(*bench_inputs)
-            torch.cuda.synchronize()
-
-            eager_times = []
-            for _ in range(benchmark_runs):
-                start_evt = torch.cuda.Event(enable_timing=True)
-                end_evt = torch.cuda.Event(enable_timing=True)
-                start_evt.record()
-                with torch.no_grad():
-                    ref_model(*bench_inputs)
-                end_evt.record()
-                end_evt.synchronize()
-                eager_times.append(start_evt.elapsed_time(end_evt))
-            eager_ms = float(np.median(eager_times))
-            result["baseline_eager_ms"] = eager_ms
-
-            compile_ms = 0.0
+        # === Step 12: candidate timing via dlsym (baselines from Step 8) ===
+        if timing_ok:
             try:
-                compiled_model = torch.compile(ref_model)
+                torch.manual_seed(42)
+                bench_inputs = ref_mod.get_inputs()
+                if not isinstance(bench_inputs, (list, tuple)):
+                    bench_inputs = [bench_inputs]
+                bench_inputs = _move_to_cuda(bench_inputs, torch)
+                bench_tensor_inputs = [
+                    t.contiguous().float() for t in bench_inputs if isinstance(t, torch.Tensor)
+                ]
+                bench_out_buf = torch.empty(
+                    bench_ref_cpu.shape, dtype=torch.float32, device="cuda"
+                )
+
                 for _ in range(warmup_iters):
-                    with torch.no_grad():
-                        compiled_model(*bench_inputs)
+                    _invoke_candidate(run_kernel, sig_class, bench_tensor_inputs, bench_out_buf)
                 torch.cuda.synchronize()
 
-                compile_times = []
+                kernel_times = []
                 for _ in range(benchmark_runs):
                     start_evt = torch.cuda.Event(enable_timing=True)
                     end_evt = torch.cuda.Event(enable_timing=True)
+                    # Device-wide sync before each timestamp (see Step 8).
+                    torch.cuda.synchronize()
                     start_evt.record()
-                    with torch.no_grad():
-                        compiled_model(*bench_inputs)
+                    _invoke_candidate(run_kernel, sig_class, bench_tensor_inputs, bench_out_buf)
+                    torch.cuda.synchronize()
                     end_evt.record()
                     end_evt.synchronize()
-                    compile_times.append(start_evt.elapsed_time(end_evt))
-                compile_ms = float(np.median(compile_times))
-            except Exception:
-                compile_ms = 0.0
-            result["baseline_compile_ms"] = compile_ms
+                    kernel_times.append(start_evt.elapsed_time(end_evt))
 
-            for _ in range(warmup_iters):
-                _invoke_candidate(run_kernel, sig_class, bench_tensor_inputs, bench_out_buf)
-            torch.cuda.synchronize()
+                kernel_times_np = np.array(kernel_times)
+                kernel_ms = float(np.median(kernel_times_np))
+                result["runtime_ms"] = kernel_ms
+                result["runtime_stats"] = {
+                    "mean": float(np.mean(kernel_times_np)),
+                    "median": float(np.median(kernel_times_np)),
+                    "std": float(np.std(kernel_times_np)),
+                    "min": float(np.min(kernel_times_np)),
+                    "max": float(np.max(kernel_times_np)),
+                    "eager_ms": eager_ms,
+                    "compile_ms": compile_ms,
+                }
 
-            kernel_times = []
-            for _ in range(benchmark_runs):
-                start_evt = torch.cuda.Event(enable_timing=True)
-                end_evt = torch.cuda.Event(enable_timing=True)
-                start_evt.record()
-                _invoke_candidate(run_kernel, sig_class, bench_tensor_inputs, bench_out_buf)
-                end_evt.record()
-                end_evt.synchronize()
-                kernel_times.append(start_evt.elapsed_time(end_evt))
+                # Speedup guard at source: non-finite or <=0 measured times
+                # emit None — inf/NaN must never reach the reward path.
+                result["speedup_vs_orig"] = _guarded_speedup(eager_ms, kernel_ms)
+                result["speedup_vs_dg"] = _guarded_speedup(compile_ms, kernel_ms)
 
-            kernel_times_np = np.array(kernel_times)
-            kernel_ms = float(np.median(kernel_times_np))
-            result["runtime_ms"] = kernel_ms
-            result["runtime_stats"] = {
-                "mean": float(np.mean(kernel_times_np)),
-                "median": float(np.median(kernel_times_np)),
-                "std": float(np.std(kernel_times_np)),
-                "min": float(np.min(kernel_times_np)),
-                "max": float(np.max(kernel_times_np)),
-                "eager_ms": eager_ms,
-                "compile_ms": compile_ms,
-            }
+                # No-op check: suspiciously fast runtime means the candidate
+                # skipped computation. A crash inside the check is a failed
+                # check (no silent pass — audit finding 2).
+                try:
+                    from openenv_env.anti_hack import check_not_noop
 
-            if eager_ms > 0 and kernel_ms > 0:
-                result["speedup_vs_orig"] = eager_ms / kernel_ms
-            if compile_ms > 0 and kernel_ms > 0:
-                result["speedup_vs_dg"] = compile_ms / kernel_ms
-
-            # No-op check: if runtime is suspiciously fast, candidate skipped computation
-            try:
-                from openenv_env.anti_hack import check_not_noop
-
-                passed, reason = check_not_noop(kernel_ms)
-                if not passed:
+                    noop_passed, noop_reason = check_not_noop(kernel_ms)
+                except Exception as exc:
+                    noop_passed = False
+                    noop_reason = f"check_not_noop raised: {str(exc)[:300]}"
+                if not noop_passed:
                     result["correct"] = False
-                    result["error"] = f"Anti-hack: {reason}"
+                    result["hack_suspected"] = True
+                    result["error"] = f"Anti-hack: {noop_reason}"
                     result["verifier_msg"] = result["error"]
                     result["speedup_vs_orig"] = 0.0
                     result["speedup_vs_dg"] = 0.0
-            except Exception:
-                pass
+            except Exception as exc:
+                result["error"] = f"Profiling failed: {str(exc)[:500]}"
+
+        # === Step 13: timed-output re-verification (non-deterministic seed) ===
+        # ONE extra candidate call on a fresh input the candidate cannot have
+        # memorized (seed derived from os.urandom); the reference is computed
+        # on CPU (ref_model is stateless per _ops_task_supported) so no GPU
+        # reference buffer exists while the candidate runs. Closes the
+        # call-count-switch timing hack and fixed-input constant folding.
+        try:
+            fresh_seed = int.from_bytes(os.urandom(8), "little") % (2**31)
+            torch.manual_seed(fresh_seed)
+            fresh_inputs = ref_mod.get_inputs()
+            if not isinstance(fresh_inputs, (list, tuple)):
+                fresh_inputs = [fresh_inputs]
+            with torch.no_grad():
+                fresh_ref_cpu = ref_model.cpu()(*fresh_inputs).contiguous().float()
+            fresh_tensor_inputs = [
+                t.contiguous().float().cuda()
+                for t in fresh_inputs
+                if isinstance(t, torch.Tensor)
+            ]
+            fresh_out = torch.empty(
+                fresh_ref_cpu.shape, dtype=torch.float32, device="cuda"
+            )
+            _invoke_candidate(run_kernel, sig_class, fresh_tensor_inputs, fresh_out)
+            torch.cuda.synchronize()
+            _assert_close(fresh_out.cpu(), fresh_ref_cpu, torch)
         except Exception as exc:
-            result["error"] = f"Profiling failed: {str(exc)[:500]}"
+            result["correct"] = False
+            result["hack_suspected"] = True
+            result["speedup_vs_orig"] = None
+            result["speedup_vs_dg"] = None
+            result["error"] = f"Timed-output re-verification failed: {str(exc)[:500]}"
+            result["verifier_msg"] = result["error"]
 
     return result
