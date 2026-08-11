@@ -84,11 +84,12 @@ KernelForge hackathon interpretation:
 
 Dr. Kernel highlights the bias in group-relative advantages and the importance of the leave-one-out correction at small `G`, especially `G=2`. Source: [Dr. Kernel paper](https://arxiv.org/abs/2602.05885)
 
-KernelForge implication:
+KernelForge reality (2026-08-10 audit — do not overstate this):
 
-- keep `TRLOOGRPOTrainer`
-- keep `N / (N - 1)` scaling active
-- do not revert to vanilla GRPO while using small groups
+- `TRLOOGRPOTrainer` exists, but the `N / (N - 1)` correction is **INACTIVE under TRL 0.29**: the `_compute_advantages` hook it overrides does not exist there (advantages are computed inline in `grpo_trainer.py`), and the internal gate additionally restricts the scaling to `loss_type == "grpo"` while the project default is `"dapo"`.
+- Every training run to date has therefore used vanilla TRL advantages. The trainer now emits a loud `RuntimeWarning` at init under every loss_type whenever the correction is inactive.
+- Even if restored, a uniform `N/(N-1)` scale on group-std-normalized advantages is equivalent to a learning-rate bump — the primary mitigation for small-G pathologies is raising `G` itself (Stage 1 default is now G=8), not this scaling.
+- Restoring it for real requires a TRL version that exposes an advantage hook, or a subclass of the inline computation pinned to a specific TRL source with a regression test.
 
 ### 2. Multi-turn kernel optimization is evaluation-bound
 

@@ -92,9 +92,21 @@ def supports_ops6k_live_eval(task_code: str) -> bool:
 
 def infer_evaluation_backend(row: dict[str, Any]) -> str:
     """Infer which evaluator can score a row live."""
+    # Owner decision 2026-08-10: explicit dataset-level unsupported labels are
+    # sticky. Curated-out rows (e.g. 3+-tensor ops6k rows with no extern-C
+    # signature class — E3 deferred, see EXP-018d) must not be re-included by
+    # recomputation. Only the unsupported direction is sticky; claimed
+    # "ops6k"/"wcc" labels are still re-verified below.
+    if row.get("supports_evaluation") is False or row.get("evaluation_backend") == "unsupported":
+        return "unsupported"
     task_code = str(row.get("task_code") or "").strip()
     if task_code:
-        return "ops6k" if supports_ops6k_live_eval(task_code) else "unsupported"
+        if not supports_ops6k_live_eval(task_code):
+            return "unsupported"
+        # The evaluator only has E1/E2 extern-C signatures; a row it cannot
+        # infer a signature for is permanently dead (EXP-018d open item), so
+        # a dataset rebuild must never resurrect signature-less rows.
+        return "ops6k" if infer_signature_class(task_code) is not None else "unsupported"
 
     ops = {op.lower() for op in parse_ops(row.get("ops"))}
     prompt = str(row.get("prompt", "")).lower()

@@ -7,7 +7,8 @@ Multi-turn agentic training via TRL's rollout_func:
   - LR 2e-6 to avoid catastrophic forgetting
   - beta=0.04 default (TRL/GRPO standard KL penalty; override to 0.0 via
     KERNELFORGE_STAGE1_BETA=0.0 for the "let model explore freely" ablation)
-  - G=2 generations, 100 max_steps (hackathon config)
+  - G=8 generations default (2026-08-10 audit U2: G=2 erases the graded
+    v3 reward structure; field floor is G=8-16), 100 max_steps
   - vLLM disabled by default for hackathon bring-up (`KERNELFORGE_USE_VLLM=0`)
 
 Dataset: CUDA-Agent-Ops-6K easy operators (single-op subset).
@@ -68,12 +69,27 @@ def _env_float(name: str, default: float) -> float:
 # Multi-turn configuration
 MAX_TURNS = _env_int("KERNELFORGE_STAGE1_MAX_TURNS", 3)
 MAX_STEPS = _env_int("KERNELFORGE_STAGE1_MAX_STEPS", 100)
-MAX_COMPLETION_LENGTH = _env_int("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", 1024)
+# do-not-repeat.md 2026-05-18: any Stage 1/3 run with max_completion <= 1024
+# is a ruled-out family — kernels truncate mid-source and every reward
+# collapses to -1 (EXP-009-B isolated the causal variable). The default must
+# be >= 2048 IN CODE so the env override is no longer load-bearing (the
+# project has three documented env-propagation failures).
+MAX_COMPLETION_LENGTH = _env_int("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", 2048)
 # EXP-003: optional warm-start from a Stage 2 SFT adapter checkpoint.
 INIT_CKPT = os.getenv("KERNELFORGE_STAGE1_INIT_CKPT", "") or None
 # EXP-006: env-driven G and beta so we can A/B these without code edits.
-# Defaults match the original config (G=2, TRL default beta=0.04).
-NUM_GENERATIONS = _env_int("KERNELFORGE_STAGE1_NUM_GENERATIONS", 2)
+# 2026-08-10 audit U2: G=2 reduces the graded v3 reward to ordinal +-1/sqrt(2)
+# advantages and same-bucket pairs give zero gradient; every published
+# kernel-RL config uses G>=8 (Kevin: 16, DAPO/Dr.GRPO floor: 8). Default is
+# now G=8. TRL 0.29 requires generation_batch_size (= per_device_train_batch
+# x gradient_accumulation_steps) divisible by G — EXP-008-F (slurm 6886282,
+# do-not-repeat 2026-05-17) died at init with "generation_batch_size (4)
+# must be divisible by num_generations (8)" — so GRAD_ACCUM defaults to G.
+# OOM fallback on a single H200 at max_completion=2048: set
+#   KERNELFORGE_STAGE1_NUM_GENERATIONS=4 KERNELFORGE_STAGE1_GRAD_ACCUM=4
+# (G=4/accum=4 keeps divisibility and halves the GRPO buffer footprint).
+NUM_GENERATIONS = _env_int("KERNELFORGE_STAGE1_NUM_GENERATIONS", 8)
+GRAD_ACCUM = _env_int("KERNELFORGE_STAGE1_GRAD_ACCUM", NUM_GENERATIONS)
 BETA = _env_float("KERNELFORGE_STAGE1_BETA", 0.04)
 # EXP-008 C: TRL 0.29 loss_type — "dapo" (default), "grpo", "gspo".
 # GSPO addresses Qwen3 MoE token-level GRPO instability (Qwen team's own paper).
@@ -127,6 +143,14 @@ def load_stage1_dataset() -> Dataset:
     except Exception as e:
         print(f"Could not load Ops-6K for Stage 1: {e}")
 
+    if os.getenv("KERNELFORGE_ALLOW_POOL_FALLBACK", "0") != "1":
+        raise RuntimeError(
+            "Stage 1 task pool failed to load and silent fallback is disabled "
+            "(do-not-repeat 2026-08-11: exp018c v1/v2 spent GPU-hours on the "
+            "3-prompt WCC fallback instead of the intended ops6k pool). Fix the "
+            "dataset, or set KERNELFORGE_ALLOW_POOL_FALLBACK=1 to accept the "
+            "WCC fallback deliberately."
+        )
     print("Using fallback Stage 1 prompts with live WCC evaluation support")
     return _dataset_from_rows([
         {
@@ -167,6 +191,8 @@ def main():
     print(f"  Max turns per episode: {MAX_TURNS}")
     print(f"  Max training steps: {MAX_STEPS}")
     print(f"  Max completion length: {MAX_COMPLETION_LENGTH}")
+    print(f"  Num generations (G): {NUM_GENERATIONS}")
+    print(f"  Gradient accumulation steps: {GRAD_ACCUM}")
 
     if INIT_CKPT:
         print(f"Warm-starting Stage 1 from checkpoint: {INIT_CKPT}")
@@ -186,6 +212,21 @@ def main():
     SAVE_STEPS = _env_int("KERNELFORGE_STAGE1_SAVE_STEPS", 5)
     SAVE_TOTAL_LIMIT = _env_int("KERNELFORGE_STAGE1_SAVE_TOTAL_LIMIT", 3)
 
+    # TRL 0.29 divisibility constraint (EXP-008-F): fail fast with a clear
+    # message instead of burning a model load before TRL's validator fires.
+    per_device_train_batch_size = 1
+    generation_batch_size = per_device_train_batch_size * GRAD_ACCUM
+    if generation_batch_size % NUM_GENERATIONS != 0:
+        raise ValueError(
+            f"generation_batch_size ({generation_batch_size} = "
+            f"per_device_train_batch_size {per_device_train_batch_size} x "
+            f"gradient_accumulation_steps {GRAD_ACCUM}) must be divisible by "
+            f"num_generations ({NUM_GENERATIONS}) per TRL 0.29 GRPO. Set "
+            "KERNELFORGE_STAGE1_GRAD_ACCUM to a multiple of "
+            "KERNELFORGE_STAGE1_NUM_GENERATIONS (defaults: G=8/accum=8; "
+            "OOM fallback: G=4/accum=4)."
+        )
+
     config = GRPOConfig(
         learning_rate=2e-6,
         temperature=1.0,         # High exploration
@@ -193,8 +234,8 @@ def main():
         beta=BETA,
         loss_type=LOSS_TYPE,
         max_completion_length=MAX_COMPLETION_LENGTH,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=per_device_train_batch_size,
+        gradient_accumulation_steps=GRAD_ACCUM,
         max_steps=MAX_STEPS,
         optim=OPTIMIZER,
         bf16=USE_BF16,

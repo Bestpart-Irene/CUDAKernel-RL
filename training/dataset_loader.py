@@ -55,6 +55,25 @@ from training.task_support import filter_supported_tasks, normalize_task_row, su
 
 DEFAULT_COMBINED_PATH = ROOT / "datasets" / "combined_kernelforge.jsonl"
 DEFAULT_DG_SFT_PATH = ROOT / "datasets" / "doublegraph_sft.jsonl"
+DEFAULT_HOLDOUT_PATH = ROOT / "datasets" / "holdout_eval.jsonl"
+
+
+def _holdout_prompts(path: Path = DEFAULT_HOLDOUT_PATH) -> set[str]:
+    """Prompts of the held-out eval split (scripts/build_holdout_split.py).
+
+    Training must never include these rows (AGENTS.md: never train on the
+    eval split). Empty set when no holdout file exists.
+    """
+    if not path.exists():
+        return set()
+    prompts: set[str] = set()
+    with path.open() as f:
+        for line in f:
+            raw = line.strip()
+            if raw:
+                prompts.add(str(json.loads(raw).get("prompt", "")).strip())
+    prompts.discard("")
+    return prompts
 
 
 class MiniDataset(list):
@@ -187,6 +206,19 @@ def load_training_dataset(
         combined_output=combined_output,
     )
     supported_rows = filter_supported_tasks(rows)
+    holdout_prompts = _holdout_prompts()
+    if holdout_prompts:
+        before = len(supported_rows)
+        supported_rows = [
+            row for row in supported_rows
+            if str(row.get("prompt", "")).strip() not in holdout_prompts
+        ]
+        excluded = before - len(supported_rows)
+        print(
+            f"Holdout exclusion: removed {excluded} eval-split rows from the "
+            f"training pool ({len(supported_rows)} remain; see "
+            "datasets/holdout_manifest.json)."
+        )
 
     if stage_key == "stage1":
         stage1_rows = [

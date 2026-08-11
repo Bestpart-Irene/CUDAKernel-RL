@@ -20,14 +20,14 @@
 | **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum **(optimized per GRPO-15)** |
 | **LR** | 2e-6 | 5e-6 | 3e-6 |
 | **Temperature** | 1.0 | 0.7 (generation) | 0.7 |
-| **G (generations)** | 2 | — | 2 |
+| **G (generations)** | 8 (default since 2026-08-10; OOM fallback G=4/accum=4) | — | 2 |
 | **Max turns** | 3 | — | **3** (matches Dr. Kernel MAX_TURN=3; env var `KERNELFORGE_MAX_TURNS`) |
 | **Steps/Epochs** | 100 steps | 3 epochs | **50 steps** (hackathon pilot; 150 is future target) |
 | **Batch** | 1 × 4 grad_accum | 1 × 4 grad_accum | 1 × 4 grad_accum |
 | **Optimizer** | paged_adamw_8bit | — | paged_adamw_8bit |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
 
-**Shared**: bf16=True, max_prompt_length=512, max_completion_length=768, top_k=50, top_p=0.95, repetition_penalty=1.05, use_vllm=False (disabled for hackathon; set KERNELFORGE_USE_VLLM=1 to enable)
+**Shared**: bf16=True, max_prompt_length=512, max_completion_length=2048 (do-not-repeat 2026-05-18: ≤1024 is a ruled-out family), top_k=50, top_p=0.95, repetition_penalty=1.05, use_vllm=False (disabled for hackathon; set KERNELFORGE_USE_VLLM=1 to enable)
 
 ## LoRA Config (`model_loader.py`)
 
@@ -85,9 +85,9 @@ Legacy constructor name is retained for compatibility, but evaluation now routes
 - `save_rft_dataset(filtered, output_path)` → HF messages format
 - Generation: max_new_tokens=2048, temperature=0.7, top_p=0.95
 
-## TRLOO Custom Trainer (`custom_grpo_trainer.py`) — IMPLEMENTED
+## TRLOO Custom Trainer (`custom_grpo_trainer.py`) — INACTIVE under TRL 0.29
 
-`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement for TRL's GRPOTrainer. Overrides `_compute_advantages()` to apply N/(N-1) scaling after parent computes vanilla GRPO advantages. Fixes 50% gradient shrinkage at G=2 (Dr. Kernel, arXiv 2602.05885).
+`TRLOOGRPOTrainer(GRPOTrainer)` — the N/(N-1) correction CANNOT run under TRL 0.29: the `_compute_advantages` hook does not exist (advantages are computed inline), and the old gate only fired for `loss_type=="grpo"` while the default is `"dapo"`. The trainer now emits a loud RuntimeWarning at init under every loss_type when the correction is inactive (2026-08-10 audit U2). The real small-G mitigation is G=8 (now the Stage-1 default). Do not cite TRLOO as an active mitigation.
 
 Also provides factory: `create_trloo_trainer(model, tokenizer, reward_funcs, train_dataset, config, rollout_func)`.
 
@@ -143,7 +143,7 @@ Implements SkyDiscover's algorithms natively (no external dependency).
 
 | Technique | Status | Location |
 |-----------|--------|----------|
-| TRLOO advantage scaling (N/(N-1)) | **DONE** | `custom_grpo_trainer.py` |
+| TRLOO advantage scaling (N/(N-1)) | **INACTIVE** (no TRL 0.29 hook; loud warning at init; use G=8 instead) | `custom_grpo_trainer.py` |
 | Local compile fast-path | **DONE** | `multi_turn_rollout.py:_local_compile_check()` |
 | Ops-6K evaluation | **DONE** | `eval_service/eval_core.py:evaluate_ops6k_kernel_impl()` via `eval_backend` |
 | Discrete reward {-1,1,2,3} | **DONE** | `reward.py:compute_reward()` |

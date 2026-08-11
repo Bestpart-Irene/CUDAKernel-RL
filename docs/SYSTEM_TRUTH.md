@@ -38,7 +38,7 @@ This is **NOT** a CUDA Agent reproduction. It is a narrower pilot: prove the env
 **What we take:**
 | Element | Where in our code | Verified? |
 |---------|------------------|-----------|
-| TRLOO `N/(N-1)` advantage correction | `training/custom_grpo_trainer.py:TRLOOGRPOTrainer._compute_advantages()` lines 32-59 | YES — fixes 50% gradient shrinkage at G=2 |
+| TRLOO `N/(N-1)` advantage correction | `training/custom_grpo_trainer.py:TRLOOGRPOTrainer._compute_advantages()` | NO — INACTIVE under TRL 0.29: the `_compute_advantages` hook does not exist (advantages computed inline) and the gate only covers `loss_type=="grpo"` while the default is `"dapo"`; trainer warns loudly at init (2026-08-10 audit) |
 | Anti-hack: 3 failure modes (reward hacking, lazy optimization, biased credit) | `openenv_env/anti_hack.py` lines 87-274 (5 checks) | YES — wired into `eval_core.py` lines 732-773 |
 | `max_turns=3` | `openenv_env/kernel_forge_env.py` constructor | YES — `int(os.getenv("KERNELFORGE_MAX_TURNS", "3"))` |
 
@@ -261,7 +261,7 @@ Each pattern includes source file reference (e.g., `louvain_f32.cu`, `bfs_direct
 | Model loading | YES | `training/model_loader.py` — Unsloth + fallback to transformers + PEFT | Needs packages installed |
 | Dataset loading | YES | `training/dataset_loader.py` — 224 combined rows | Needs `doublegraph_sft.jsonl` present |
 | Curriculum | YES | `training/curriculum.py` — 4 phases, 23 tasks, pure Python | None |
-| TRLOO trainer | YES | `training/custom_grpo_trainer.py` — 94 lines, N/(N-1) scaling | Needs TRL |
+| TRLOO trainer | Subclass only | `training/custom_grpo_trainer.py` — N/(N-1) scaling INACTIVE under TRL 0.29 (no `_compute_advantages` hook; warns at init) | Needs TRL with an advantage hook |
 | Multi-turn rollout | YES in code | `training/multi_turn_rollout.py` — extract CUDA → compile check → remote eval → feedback | Needs eval backend deployed |
 | Stage 1 warmup | YES in code | `training/stage1_warmup.py` — 166 lines | Needs eval backend |
 | Stage 2 SFT | YES in code | `training/stage2_rft.py` — 130 lines | Needs Stage 1 checkpoint + eval backend |
@@ -335,7 +335,7 @@ GRPO training → multi_turn_rollout → evaluate_code_remote → dispatch_eval 
 | `stage3_grpo.py` | 268 | IMPLEMENTED | TRLOO GRPO + curriculum |
 | `grpo_train.py` | 141 | IMPLEMENTED | Preflight + stage launcher |
 | `multi_turn_rollout.py` | 299 | IMPLEMENTED | TRL-compatible rollout with local compile check |
-| `custom_grpo_trainer.py` | 94 | IMPLEMENTED | TRLOO `N/(N-1)` correction |
+| `custom_grpo_trainer.py` | 94 | SUBCLASS ONLY | TRLOO `N/(N-1)` correction INACTIVE under TRL 0.29 (no hook; init warning) |
 | `model_loader.py` | 246 | IMPLEMENTED | Unsloth + fallback chain |
 | `dataset_loader.py` | 169 | IMPLEMENTED | Stage-specific dataset loading |
 | `task_support.py` | 327 | IMPLEMENTED | Task routing, payload building, eval dispatch |

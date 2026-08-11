@@ -95,7 +95,7 @@ The strongest defensible story today is:
 1. The environment path is real for a narrow live-evaluable slice.
 2. The evaluator path is real for WCC and a stateless Ops subset.
 3. The reward is real: discrete milestones `{-1, 1, 2, 3}` per CUDA-Agent ablation (96.8% vs 60.4% faster rate over continuous).
-4. TRLOO is implemented.
+4. TRLOO exists as a subclass but the N/(N-1) correction is INACTIVE under TRL 0.29 (no `_compute_advantages` hook; loss-type gate); the trainer warns at init — 2026-08-10 audit.
 5. SFT-first is still the correct near-term posture.
 6. Search remains the strongest hedge and should stay complementary.
 
@@ -127,7 +127,7 @@ These parts are directionally correct and should remain:
 - `modal_app.py` has a real WCC path and a real stateless Ops extension-eval path.
 - `training/task_support.py` centralizes evaluator routing and payload construction.
 - `openenv_env/reward.py` computes discrete milestone reward `{-1, 1, 2, 3}` with correctness gating.
-- `training/custom_grpo_trainer.py` implements the TRLOO `N/(N-1)` advantage scaling.
+- `training/custom_grpo_trainer.py` carries the TRLOO `N/(N-1)` advantage scaling, but it is INACTIVE under TRL 0.29 (no `_compute_advantages` hook; only gated to `loss_type=="grpo"`); the trainer emits a RuntimeWarning at init.
 - `openenv_env/skill_builder.py` injects hardware-aware SKILL context plus 7 doubleGraph A100 patterns.
 
 ### Partially Implemented
@@ -233,7 +233,7 @@ Each row below is the section-level verdict for `docs/GRPO_DEEP_DIVE.md`.
 
 | Claim | Verdict | Why | Counterargument if keeping it | Action |
 |---|---|---|---|---|
-| TRLOO is implemented | True | `training/custom_grpo_trainer.py` applies `G/(G-1)`. | Keep. | None. |
+| TRLOO is implemented | Not true in effect | `training/custom_grpo_trainer.py` defines the `G/(G-1)` override, but TRL 0.29 never calls it (no `_compute_advantages` hook) and the gate excludes the default `"dapo"` loss. | The subclass is still the right seam if TRL restores the hook. | Treat as inactive; trainer warns at init (2026-08-10 audit). |
 | MARS is part of the current core | Not true | No MARS implementation is wired in the current trainer or rollout. | Keep only as stretch goal. | Relabel everywhere. |
 | Current reward wraps OpenEnv exactly | Partial | The training path uses rollout helpers and direct Modal dispatch more than the OpenEnv server. | The reward still comes from the same evaluation logic family. | Phrase as “OpenEnv-aligned evaluator path,” not exact runtime path. |
 | 30B-on-H100 is the active default | Not true in code by default | Code default is still Coder-Next. | Keep as target hackathon config. | Align code or docs. |
