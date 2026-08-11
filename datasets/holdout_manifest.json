@@ -1,0 +1,46 @@
+{
+  "version": "kernelforge-holdout-v2",
+  "created": "2026-08-10",
+  "rule": "Universe: rows of the source dataset with explicit evaluation_backend in {wcc, ops6k} and a non-empty prompt (WCC+ops6k union; largest locally available supported universe). The CAMPAIGN-018 spike-pool tasks (vector_add_e2, F.elu, F.softplus) are pinned to the train side and are never holdout-eligible. Holdout size max(3, round(0.20*N)) over the full universe N, stratified by evaluation_backend via largest-remainder with >=1 row per backend on both sides; within a backend the ELIGIBLE rows with the lowest sha256('kernelforge-holdout-v2:' + task_id) digests are held out.",
+  "source_dataset": "datasets/combined_kernelforge.jsonl",
+  "source_dataset_sha256": "6bfbf44544df42bb83e9541368dc88c31863cd96539ecd33cb7f698d85763455",
+  "universe_size": 18,
+  "holdout": {
+    "size": 4,
+    "by_backend": {
+      "ops6k": 3,
+      "wcc": 1
+    },
+    "task_pool_hash": "67e448536c93",
+    "task_ids": [
+      "a100/components/weakly_connected_components_seg",
+      "ops6k_0582d7adf666",
+      "ops6k_694f80abc43f",
+      "ops6k_e2db4c93652f"
+    ]
+  },
+  "train": {
+    "size": 14,
+    "by_backend": {
+      "ops6k": 11,
+      "wcc": 3
+    },
+    "task_pool_hash": "19e85e02f327",
+    "task_ids": [
+      "a100/components/weakly_connected_components",
+      "a100/components/weakly_connected_components_mask",
+      "a100/components/weakly_connected_components_seg_mask",
+      "ops6k_101540513bc6",
+      "ops6k_3c7d186db4bc",
+      "ops6k_4343751ebe34",
+      "ops6k_50952793b42d",
+      "ops6k_6645fc3a14d1",
+      "ops6k_9cd6b81bcb19",
+      "ops6k_bf673cb9148b",
+      "ops6k_c828582ac1ec",
+      "ops6k_ca642929f957",
+      "ops6k_fce57420bb42",
+      "vector_add_e2"
+    ]
+  }
+}

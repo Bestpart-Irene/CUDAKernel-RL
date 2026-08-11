@@ -61,8 +61,14 @@ four checks. The reviewer agent rejects diffs that regress any of them.
 - Default editable surface is `training/grpo_train.py` plus the immediate
   rollout files: `training/stage3_grpo.py`, `training/multi_turn_rollout.py`,
   `training/custom_grpo_trainer.py`, `configs/scaling_ladder.json`.
-- Never modify the frozen evaluator: `eval_service/eval_core.py`,
-  `evaluation/verifier.py`, `evaluation/compiler.py`, `evaluation/ablation.py`.
+- Versioned evaluator freeze (2026-08-10): the evaluator —
+  `eval_service/eval_core.py`, `evaluation/verifier.py`,
+  `openenv_env/anti_hack.py` — may only change via a campaign-authorized,
+  ledgered change. Every evaluator change must appear as a new
+  `evaluator_sha` in the affected `research/results.tsv` rows (and in
+  `research/live/master.json`), and it re-opens cold-start comparability:
+  results recorded under different `evaluator_sha` values are not
+  comparable. Silent modification remains forbidden.
 - Never modify `openenv_env/anti_hack.py` unless the task is explicitly a
   reward-integrity change with reviewer sign-off.
 - Treat `openenv_env/reward.py` as quasi-frozen: only edit when the experiment
@@ -73,7 +79,13 @@ four checks. The reviewer agent rejects diffs that regress any of them.
 - Run the timed benchmark (`scripts/run_benchmark.py` or the managed Modal /
   Northflank path) before claiming success.
 - Record every completed run with one row appended to `research/results.tsv`
-  plus a one-paragraph note in `research/notes.md`.
+  plus a one-paragraph note in `research/notes.md`. Ledger rows use the
+  19-column schema (2026-08-10): `timestamp, experiment_id,
+  parent_master_hash, runner, job_id, mean_reward, pass_rate,
+  speedup_vs_orig, fast_p, reward_version, eval_split, seed_count,
+  max_turns, eval_backend, evaluator_sha, task_pool_hash, init_ckpt,
+  promote, comment` — fill unknown values with literal `null`;
+  `task_pool_hash` comes from `scripts/task_pool_hash.py`.
 - Promotion is local: a new master only takes over when its `mean_reward`
   beats current master on the same eval split, same seed count, same
   `max_turns`.
@@ -82,7 +94,8 @@ four checks. The reviewer agent rejects diffs that regress any of them.
 
 ## Source of Truth
 
-- `research/results.tsv` — append-only local run ledger
+- `research/results.tsv` — append-only local run ledger (19-column schema,
+  2026-08-10; see Hard Rules for the column list)
 - `research/live/master.json` — current promoted master (hash, metrics, date)
 - `research/notes.md` — durable narrative
 - `research/do-not-repeat.md` — failed approaches and why

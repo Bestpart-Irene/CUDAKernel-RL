@@ -14,6 +14,27 @@ from typing import Any
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_POOL_PATH = _PROJECT_ROOT / "tasks" / "pool_v0.jsonl"
+_HOLDOUT_PATH = _PROJECT_ROOT / "datasets" / "holdout_eval.jsonl"
+
+
+def _holdout_prompts() -> set[str]:
+    """Prompts of the held-out eval split — never sampled for episodes.
+
+    NOTE: if tasks/pool_v0.jsonl is ever generated (tasks/build_task_pool.py),
+    it takes priority over the combined-dataset fallback and is NOT filtered
+    here — overlap with the held-out tasks must be excluded by prompt there
+    too before that path is used for training.
+    """
+    if not _HOLDOUT_PATH.exists():
+        return set()
+    prompts: set[str] = set()
+    with open(_HOLDOUT_PATH, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                prompts.add(str(json.loads(line).get("prompt", "")).strip())
+    prompts.discard("")
+    return prompts
 
 
 class TaskPool:
@@ -53,13 +74,17 @@ class TaskPool:
             # Fallback: load from combined dataset, filter to supported
             combined = _PROJECT_ROOT / "datasets" / "combined_kernelforge.jsonl"
             if combined.exists():
+                holdout = _holdout_prompts()
                 with open(combined, encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if not line:
                             continue
                         row = json.loads(line)
-                        if row.get("evaluation_backend") in {"ops6k", "wcc"}:
+                        if (
+                            row.get("evaluation_backend") in {"ops6k", "wcc"}
+                            and str(row.get("prompt", "")).strip() not in holdout
+                        ):
                             tasks.append(row)
 
         if not tasks:

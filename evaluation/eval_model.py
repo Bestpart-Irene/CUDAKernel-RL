@@ -108,7 +108,27 @@ def evaluate_checkpoint(
 
 
 def _load_eval_tasks(num_problems: int) -> list[dict]:
-    """Load held-out evaluator-backed tasks from the combined dataset."""
+    """Load held-out evaluator-backed tasks.
+
+    Primary source: datasets/holdout_eval.jsonl — the deterministic holdout
+    split built by scripts/build_holdout_split.py (manifest with both sides'
+    task ids + pool hashes: datasets/holdout_manifest.json). Falls back to
+    the old train-contaminated slice, loudly, only when no holdout exists.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    holdout_path = repo_root / "datasets" / "holdout_eval.jsonl"
+    if holdout_path.exists():
+        with holdout_path.open() as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        supported = filter_supported_tasks(rows)
+        if supported:
+            print(
+                f"Eval split: datasets/holdout_eval.jsonl "
+                f"({len(supported)} held-out tasks; disjoint from training by "
+                "manifest)."
+            )
+            return supported[:num_problems]
+
     combined_path = Path("datasets/combined_kernelforge.jsonl")
     if combined_path.exists():
         with combined_path.open() as f:
