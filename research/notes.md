@@ -562,3 +562,130 @@ The path forward is no longer "try another knob". It is one of:
   simplest possible ops6k task pool. Project history has never
   produced such a curve. Until the spike either passes or fails, no
   further investment is authorized.
+
+## 2026-06-01 — EXP-018c-v1 — first extern-C verification attempt (VOID; retro-recorded 2026-08-10)
+
+- hypothesis: (CAMPAIGN-018 EXP-018c) 50-step Stage-1 GRPO under the
+  unified extern "C" contract produces a rising mean_reward curve.
+- parent master hash: null
+- variable changed: verification run on composite infra (EXP-018a
+  contract); NOT single-change.
+- runner / job id: explorer-h200 / slurm 7359525
+- metrics: none recorded — VOID
+- decision: no-promote — VOID
+- interpretation: launched cold-start from base
+  (KERNELFORGE_STAGE1_INIT_CKPT="" in scripts/cluster/exp018c.slurm) in
+  tension with do-not-repeat 2026-05-16; ran on a self-contradictory
+  task pool (15/16 ops6k prompts still demanded pybind while the
+  extern-C evaluator hard-rejects it — found by the 2026-08-03 audit,
+  fixed in fc6c8f1/EXP-018d), so any outcome was uninterpretable and
+  none was recorded at the time. Only surviving datum: ~19 min/step at
+  G=2, max_completion=2048 (exp018c.slurm v2 comment), which falsifies
+  the 50-step-in-8h walltime plan and itself contradicts the step-40-50
+  pass criteria after MAX_STEPS was cut to 25. Retro-recorded during
+  the 2026-08-10 tri-agent audit; this entry closes the ghost run.
+
+## 2026-08-10 — tri-agent audit — full reports in research/audits/
+
+- verdict: campaign direction sound (extern-C contract structurally
+  stronger than published harnesses); EXP-018c-as-launched invalid on
+  five counts: (1) cold-start violates do-not-repeat 2026-05-16 with
+  the revisit condition (p(valid candidate) ≥ ~0.05) never measured;
+  (2) G=2 group-std normalization erases v3-symbol-shaped magnitudes
+  (any unequal pair → advantage ±1/√2) and the TRLOO correction is
+  inactive under default loss_type=dapo; (3) MAX_STEPS=25 vs pass
+  criteria defined over steps 40-50, no save_steps/auto-resume; (4) the
+  required deep anti-hack scan script does not exist and EXP-018a's 5/5
+  hacked-fixture replay acceptance was never recorded; (5) run unmarked
+  as verification-phase anywhere in research/ → with master=null the
+  cold-start rule would auto-promote a local-H200 verification result.
+- open hack channels on the extern-C path (reviewer report):
+  reference-output scraping (ref computed in same process/CUDA
+  context), stateful timing gaming (timed output never re-verified),
+  tolerance/fast-math gaming (rtol=atol=1e-3 plus default
+  --use_fast_math), permanently fixed eval seeds; anti-hack steps
+  wrapped in except:pass.
+- gate for any 018c rerun: EXP-018c-p0 base-model pass@k probe (3-task
+  spike pool, migrated prompts, frozen evaluator, ~1 GPU-hour) —
+  p ≥ 0.05 licenses cold start per the do-not-repeat revisit condition;
+  p < 0.05 makes EXP-018b (extern-C SFT rebuild) mandatory. Plus
+  bookkeeping: fixture replay recorded, launcher rewritten,
+  evaluator_sha/task_pool_hash added to the ledger schema.
+
+## 2026-08-10 — overhaul Phase 1 landed (post-audit infra, no training run)
+
+- evaluator hardened per audit finding 2: reference-output isolation,
+  timed-output re-verification with urandom seed, default
+  --use_fast_math dropped, anti-hack except:pass removed, device-wide
+  sync timing, B200 cc parse fix. New evaluator_sha b182df91c482;
+  versioned-freeze policy now in AGENTS.md.
+- EXP-019 anti-hack integrity bundle recorded at
+  research/experiments/EXP-019-anti-hack-integrity.md; reward_version
+  unchanged (v3-symbol-shaped).
+- trainer defaults: G 2→8, max_completion 1024→2048; TRLOO correction
+  declared INACTIVE under TRL 0.29 (docs corrected).
+- ledger schema now 19 columns — added evaluator_sha, task_pool_hash,
+  init_ckpt, eval_split, seed_count, max_turns, eval_backend.
+- 2 uninferable-signature ops6k rows relabeled unsupported (sticky in
+  task_support) — supported pool 18 (14 ops6k + 4 wcc),
+  task_pool_hash 7c9eca9b3c2d.
+- holdout split v2 built: 4 held out, 14 train; CAMPAIGN-018 spike
+  tasks pinned to train; training loaders exclude holdout by prompt.
+- EXP-018a acceptance NEGATIVE HALF recorded — 5/5 hack fixtures
+  rejected at source scan locally (positive control pending on CUDA
+  host).
+- old exp018c.slurm deleted; probe launcher
+  scripts/cluster/exp018c_p0.slurm ready but NOT submitted.
+- full test suite: 259 passed.
+- decision: no run dispatched — next gate is EXP-018c-p0 probe per the
+  2026-08-10 audit entry above.
+
+## 2026-08-11 — June 018c evidence recovered from Explorer logs (three runs, not one)
+
+- hypothesis: retro-record — the June "018c" slot, previously ledgered as a
+  single VOID run (7359525), was actually THREE attempts on 2026-06-01;
+  recovered Explorer logs now live at `research/audits/evidence-june-018c/`.
+- parent master hash: null
+- variable changed: none (evidence recovery; ledger corrections only, no new run)
+- runner / job id: explorer-h200 / slurm 7359525 (v1), 7365795 (v2), 7366090 (v3)
+- metrics: v1 partial (2/50 steps, batch rewards in {-1.0, -0.5}); v2 none
+  (0/25 steps); v3 mean_reward=-1.0 terminal, pass_rate=0.0 (0 correct=True
+  across all rollouts), 25-step series flat in [-1.0, -0.75]
+- decision: no-promote — all three VOID for interpretation; results.tsv v1
+  row corrected, v2/v3 rows appended.
+- what the logs show:
+  - **v1 (7359525)**: Ops-6K dataset load FAILED (`invalid literal for
+    int() with base 10: 'trivial'`) and the launcher SILENTLY fell back to
+    3 WCC prompts (`Using fallback Stage 1 prompts with live WCC evaluation
+    support`) — the run never touched the intended ops6k pool. 2 of 50
+    steps completed at ~19 min/step (1149 s/it) before scancel; step
+    metrics WERE visible (e.g. one batch mean -0.625 std 0.25; rewards
+    -0.5 = compiled-but-wcc_kernel-symbol-missing, -1.0 = compile fail).
+    This corrects the 2026-06-01 entry's "no metrics recorded" and
+    reassigns its self-contradictory-pool attribution to v3.
+  - **v2 (7365795)**: same silent WCC fallback (its load error: `cannot
+    mix list and non-list, non-null values`); scancel'd by the operator at
+    17:43:51 EDT, ~4 min after start, 0/25 training steps completed.
+  - **v3 (7366090)**: after commit 51eb7c9 (vector_add_e2 schema hygiene)
+    the Ops-6K pool loaded (16 ops6k prompts). COMPLETED 25/25 steps in
+    7h27m (train_runtime 26827s). Cold start from base
+    Qwen3-Coder-30B-A3B-Instruct (INIT_CKPT empty), eval_backend=local,
+    reward v3-symbol-shaped, G=2, max_completion=2048, config max_turns=3
+    (TRL-0.29 dead code, effectively single-turn). Terminal step: reward
+    mean -1.0, std 0.0, grad_norm 0.0; grad_norm=0.0 on 22/25 steps with
+    blips 0.04-0.06 at steps 2/4/10; entropy 0.35 early → 0.25 terminal
+    (peak 0.45 @step7). Late completions overwhelmingly `Source rejected:
+    #include <torch/` — the cold-start base model kept emitting
+    torch-extension code because the PRE-MIGRATION dataset prompts
+    demanded pybind while the extern-C evaluator hard-rejects it (the
+    exact contradiction EXP-018d later fixed). wandb: exp018c-7366090 /
+    4ocfqywn.
+- interpretation: this is the strongest empirical support for the
+  2026-08-10 audit's two claims — the prompt-contradiction poison
+  (Source-rejected torch code dominating rollouts) and the cold-start
+  zero-gradient collapse — and it sharpens EXP-018c-p0's value: the probe
+  measures whether the EXP-018d prompt migration changed what the base
+  model emits. The 25-step flat series also shows the -0.5 symbol bucket
+  produced occasional variance (three small grad_norm blips) but never
+  gradient traction under G=2. v3 empirically reproduces the EXP-001
+  cold-start collapse family under the newer reward/evaluator stack.

@@ -154,12 +154,20 @@ check that the eval harness itself works.
 
 ## Run
 
-(populated by experiment-worker after smoke)
-
-- job id: TBD
-- log path: TBD
-- fixture replay verdict: TBD (5/5 hack rejection required to proceed to 018b)
-- single-rollout smoke verdict: TBD
+- job id: local (darwin host, negative half only) — 2026-08-10
+- log path: n/a (inline; see research/audits/2026-08-10-README.md context)
+- fixture replay verdict: **5/5 hack variants rejected at `Source rejected:`**
+  (V1 torch/extension.h include, V2 ATen include, V3 c10 namespace,
+  V4 torch:: forward-decl, V5 at::native dispatch), executed via
+  `scripts/fixture_replay_018a.py` fixtures against the 2026-08-10-hardened
+  evaluator, `evaluator_sha=b182df91c482`. Source rejection fires before any
+  nvcc invocation, so the negative half is valid on a CUDA-less host.
+- positive control (clean extern "C" elu kernel must compile + run correct):
+  **PENDING — requires CUDA host**; queued alongside the EXP-018c-p0 probe
+  on Explorer (`scripts/cluster/fixture_replay_018a.slurm`). The gate is not
+  fully PASSED until this half lands.
+- single-rollout smoke verdict: superseded by the EXP-018c-p0 probe
+  (32 samples/task × 3 tasks — a strict superset of the Day-6 smoke).
 - promote: false (verification-only, infra step)
 
 ## Interpretation

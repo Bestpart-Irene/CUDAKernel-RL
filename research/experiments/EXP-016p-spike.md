@@ -109,14 +109,5 @@ search or scope reduction) iff:
 
 ## Run
 
-(populated by experiment-worker after slurm completion)
-
-- job id: TBD
-- log path: TBD
-- metrics: mean_reward=TBD pass_rate=TBD speedup_vs_orig=TBD fast_p=TBD
-- spike verdict: TBD (PASS / FAIL / INCONCLUSIVE)
-- promote: false (verification-only)
-
-## Interpretation
-
-(populated after run)
+EXP-016p-spike was superseded by EXP-018c before it ran (see banner above).
+See [EXP-018c](EXP-018c-verification-extern-c.md) for the verification-run record (v1 VOID; rerun pending).

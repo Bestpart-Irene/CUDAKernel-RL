@@ -1,0 +1,86 @@
+=================================================
+EXP-018c first verification run under unified extern "C" contract
+job_id        : 7359525
+node          : d4052
+started       : Mon Jun  1 16:25:51 EDT 2026
+max_steps     : 50
+G             : 2
+beta          : 0
+reward        : v3-symbol-shaped
+task filter   : ops6k
+SFT init ckpt : '' (empty = cold start)
+eval backend  : local
+output        : /scratch/xie.yiyi/kernelforge/checkpoints/stage1_exp018c
+=================================================
+=== Stage 1: Multi-Turn GRPO Warm-up for A100 (sm_80) ===
+  Max turns per episode: 3
+  Max training steps: 50
+  Max completion length: 2048
+KERNELFORGE_SKIP_UNSLOTH=1 → bypassing Unsloth, loading via Transformers + PEFT.
+Falling back to Transformers + PEFT primary model loader
+Primary model loaded via Transformers + PEFT from Qwen/Qwen3-Coder-30B-A3B-Instruct: 843,841,536 trainable / 31,375,964,160 total params (2.69%)
+Could not load Ops-6K for Stage 1: invalid literal for int() with base 10: 'trivial'
+Using fallback Stage 1 prompts with live WCC evaluation support
+[ROLLOUT_FACTORY] make_multi_turn_rollout built rollout_func (max_turns=3, prompts_known=3)
+Stage 1: no existing checkpoint in /scratch/xie.yiyi/kernelforge/checkpoints/stage1_exp018c; starting fresh.
+Starting Stage 1 training...
+[REWARD_FROM_ENV] computing 4 rewards inline (env_reward len=0); kwargs keys=['completion_ids', 'data_source', 'difficulty', 'ops', 'prompts', 'trainer_state']
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=0 reward=-0.50 code_len=2151 compiles=True correct=False err='']
+[VERIFIER_INLINE i=0 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmpo6p47mb_/kernel.so': /tmp/tmpo6p47mb_/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=0 compiles=True has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+[COMPUTE_REWARD] compiled=False correct=False symbol_loaded=True sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=1 reward=-1.00 code_len=4449 compiles=False correct=False err='/tmp/tmp5i5vg6vy.cu(94): error: no instance of overloaded function "atomicAdd" matches the argument list             argument types are: (bool *, bool)           atomicAdd(changed, true);           ^ ']
+[VERIFIER_INLINE i=1 compiles=False correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='' error='/tmp/tmp5i5vg6vy.cu(94): error: no instance of overloaded function "atomicAdd" matches the argument list             argument types are: (bool *, bool)           atomicAdd(changed, true);           ^ ']
+[SYMPROBE_INLINE i=1 compiles=False has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=True]
+[COMPUTE_REWARD] compiled=False correct=False symbol_loaded=True sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=2 reward=-1.00 code_len=9087 compiles=False correct=False err='/tmp/tmpw0p9h97a.cu:124:47: warning: missing terminating ' character   124 | 4. Logic for handling iteration boundaries isn't fully implemented.       |                                               ^']
+[VERIFIER_INLINE i=2 compiles=False correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='' error='/tmp/tmpw0p9h97a.cu:124:47: warning: missing terminating ' character   124 | 4. Logic for handling iteration boundaries isn't fully implemented.       |                                               ^']
+[SYMPROBE_INLINE i=2 compiles=False has_extern_c=False has_wcc_kernel_decl=True has_global_wcc=True in_namespace=False is_static_or_inline=False code_tail_truncated=True]
+[COMPUTE_REWARD] compiled=False correct=False symbol_loaded=True sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=3 reward=-1.00 code_len=3057 compiles=False correct=False err='At end of source: error: expected an expression  At end of source: error: expected a ";"  At end of source: error: expected an expression  At end of source: error: expected a ")"  At end of source: er']
+[VERIFIER_INLINE i=3 compiles=False correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='' error='At end of source: error: expected an expression  At end of source: error: expected a ";"  At end of source: error: expected an expression  At end of source: error: expected a ")"  At end of source: er']
+[SYMPROBE_INLINE i=3 compiles=False has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=True]
+{'loss': 0.0, 'grad_norm': 0.04311130568385124, 'learning_rate': 2e-06, 'num_tokens': 8300.0, 'completions/mean_length': 2048.0, 'completions/min_length': 2048.0, 'completions/max_length': 2048.0, 'completions/clipped_ratio': 1.0, 'completions/mean_terminated_length': 0.0, 'completions/min_terminated_length': 0.0, 'completions/max_terminated_length': 0.0, 'rewards/reward_from_env/mean': -0.875, 'rewards/reward_from_env/std': 0.25, 'reward': -0.875, 'reward_std': 0.25, 'frac_reward_zero_std': 0.5, 'entropy': 0.34633392840623856, 'clip_ratio/low_mean': 0.0, 'clip_ratio/low_min': 0.0, 'clip_ratio/high_mean': 0.0, 'clip_ratio/high_max': 0.0, 'clip_ratio/region_mean': 0.0, 'step_time': 1143.0133336780127, 'epoch': 1.0}
+[REWARD_FROM_ENV] computing 4 rewards inline (env_reward len=0); kwargs keys=['completion_ids', 'data_source', 'difficulty', 'ops', 'prompts', 'trainer_state']
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=0 reward=-0.50 code_len=4706 compiles=True correct=False err='']
+[VERIFIER_INLINE i=0 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmpumovizm1/kernel.so': /tmp/tmpumovizm1/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=0 compiles=True has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=1 reward=-0.50 code_len=4488 compiles=True correct=False err='']
+[VERIFIER_INLINE i=1 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmpvnev77xz/kernel.so': /tmp/tmpvnev77xz/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=1 compiles=True has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=2 reward=-0.50 code_len=1651 compiles=True correct=False err='']
+[VERIFIER_INLINE i=2 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmp1k72svk1/kernel.so': /tmp/tmp1k72svk1/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=2 compiles=True has_extern_c=True has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+[COMPUTE_REWARD] compiled=False correct=False symbol_loaded=True sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=3 reward=-1.00 code_len=203 compiles=False correct=False err='/tmp/tmpzz72hthh.cu(1): warning #1835-D: attribute "__global__" does not apply here   __attribute__((global)) void init_unionfind(uint16_t* parent, uint16_t* rank, int n) {                  ^  Remark:']
+[VERIFIER_INLINE i=3 compiles=False correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='' error='/tmp/tmpzz72hthh.cu(1): warning #1835-D: attribute "__global__" does not apply here   __attribute__((global)) void init_unionfind(uint16_t* parent, uint16_t* rank, int n) {                  ^  Remark:']
+[SYMPROBE_INLINE i=3 compiles=False has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+{'loss': 0.0175, 'grad_norm': 0.04633898660540581, 'learning_rate': 1.96e-06, 'num_tokens': 14871.0, 'completions/mean_length': 1615.75, 'completions/min_length': 1417.0, 'completions/max_length': 2048.0, 'completions/clipped_ratio': 0.25, 'completions/mean_terminated_length': 1471.666748046875, 'completions/min_terminated_length': 1417.0, 'completions/max_terminated_length': 1579.0, 'rewards/reward_from_env/mean': -0.625, 'rewards/reward_from_env/std': 0.25, 'reward': -0.625, 'reward_std': 0.25, 'frac_reward_zero_std': 0.5, 'entropy': 0.43033960461616516, 'clip_ratio/low_mean': 0.0, 'clip_ratio/low_min': 0.0, 'clip_ratio/high_mean': 0.0, 'clip_ratio/high_max': 0.0, 'clip_ratio/region_mean': 0.0, 'step_time': 1141.4713755799457, 'epoch': 2.0}
+[REWARD_FROM_ENV] computing 4 rewards inline (env_reward len=0); kwargs keys=['completion_ids', 'data_source', 'difficulty', 'ops', 'prompts', 'trainer_state']
+[COMPUTE_REWARD] compiled=False correct=False symbol_loaded=True sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=0 reward=-1.00 code_len=72 compiles=False correct=False err='/tmp/tmpflsycjs4.cu(1): error: identifier "n" is undefined   int* parent = new int[n];                         ^  /tmp/tmpflsycjs4.cu(2): error: expected a declaration   for (int i = 0; i < n; ++i)   ']
+[VERIFIER_INLINE i=0 compiles=False correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='' error='/tmp/tmpflsycjs4.cu(1): error: identifier "n" is undefined   int* parent = new int[n];                         ^  /tmp/tmpflsycjs4.cu(2): error: expected a declaration   for (int i = 0; i < n; ++i)   ']
+[SYMPROBE_INLINE i=0 compiles=False has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=True]
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=1 reward=-0.50 code_len=4471 compiles=True correct=False err='']
+[VERIFIER_INLINE i=1 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmp4cwmnnl9/kernel.so': /tmp/tmp4cwmnnl9/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=1 compiles=True has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=2 reward=-0.50 code_len=4352 compiles=True correct=False err='']
+[VERIFIER_INLINE i=2 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmpg25zwm0q/kernel.so': /tmp/tmpg25zwm0q/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=2 compiles=True has_extern_c=False has_wcc_kernel_decl=False has_global_wcc=False in_namespace=False is_static_or_inline=False code_tail_truncated=False]
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[COMPUTE_REWARD] compiled=True correct=False symbol_loaded=False sv_eager=0.0 sv_compile=0.0 version=v3-symbol-shaped
+[ROLLOUT_INLINE i=3 reward=-0.50 code_len=501 compiles=True correct=False err='']
+[VERIFIER_INLINE i=3 compiles=True correct=False sv_eager=0.0 sv_compile=0.0 verifier_msg='Verification exception: Kernel FFI verification failed for '/tmp/tmpso5b90ei/kernel.so': /tmp/tmpso5b90ei/kernel.so: undefined symbol: wcc_kernel' error='']
+[SYMPROBE_INLINE i=3 compiles=True has_extern_c=False has_wcc_kernel_decl=True has_global_wcc=True in_namespace=False is_static_or_inline=False code_tail_truncated=False]

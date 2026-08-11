@@ -1,0 +1,26 @@
+=================================================
+EXP-018c first verification run under unified extern "C" contract
+job_id        : 7365795
+node          : d4052
+started       : Mon Jun  1 17:38:35 EDT 2026
+max_steps     : 25
+G             : 2
+beta          : 0
+reward        : v3-symbol-shaped
+task filter   : ops6k
+SFT init ckpt : '' (empty = cold start)
+eval backend  : local
+output        : /scratch/xie.yiyi/kernelforge/checkpoints/stage1_exp018c
+=================================================
+=== Stage 1: Multi-Turn GRPO Warm-up for A100 (sm_80) ===
+  Max turns per episode: 3
+  Max training steps: 25
+  Max completion length: 2048
+KERNELFORGE_SKIP_UNSLOTH=1 → bypassing Unsloth, loading via Transformers + PEFT.
+Falling back to Transformers + PEFT primary model loader
+Primary model loaded via Transformers + PEFT from Qwen/Qwen3-Coder-30B-A3B-Instruct: 843,841,536 trainable / 31,375,964,160 total params (2.69%)
+Could not load Ops-6K for Stage 1: cannot mix list and non-list, non-null values
+Using fallback Stage 1 prompts with live WCC evaluation support
+[ROLLOUT_FACTORY] make_multi_turn_rollout built rollout_func (max_turns=3, prompts_known=3)
+Stage 1: no existing checkpoint in /scratch/xie.yiyi/kernelforge/checkpoints/stage1_exp018c; starting fresh.
+Starting Stage 1 training...

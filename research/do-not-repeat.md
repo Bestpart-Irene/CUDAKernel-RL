@@ -114,6 +114,89 @@ managed run fails or regresses in a way that is not just noise.
   output constraints on this model class. Even then, prefer fixing the
   SFT data over inflating the prompt.
 
+## 2026-05-16 — B: combined beta + max_prompt_length + max_completion_length tweak (planner-rejected, never run)
+
+- what was tried: planner originally proposed a single experiment that
+  changed `beta`, `max_prompt_length`, and `max_completion_length`
+  simultaneously on top of the EXP-001 baseline.
+- why it failed: violates the one-variable rule — three coupled knobs
+  in one run produces no actionable signal. Must be split into three
+  separate single-variable experiments **after vLLM colocate lands in
+  master**, because rollout-backend differences dominate the wall-clock
+  and reward picture today.
+- evidence: pre-dispatch planning notes for EXP-002; no results.tsv row.
+- conditions under which it could be revisited: only after EXP-002
+  (vLLM colocate) is in master, and only as three split experiments
+  with EXP-002's master as parent.
+- [note 2026-08-10: the "EXP-002 (vLLM colocate)" referenced in this
+  entry was a draft that never ran; the EXP-002 identifier was later
+  consumed by the Stage-2 SFT run.]
+- provenance: (recovered 2026-08-10 from a stale worktree draft; see
+  archive/worktree-salvage-20260516/)
+
+## 2026-05-16 — C: async H200↔A100 pipelining via AsyncGRPOTrainer (planner-rejected, never run)
+
+- what was tried: planner proposed running rollout async on H200 while
+  the optimizer step proceeds on A100 (or vice versa) to overlap the
+  long rollout latency with policy update compute.
+- why it failed: AsyncGRPOTrainer's "Keep Routing" stabilizer is not
+  implemented for MoE actors (HF async-rl-landscape blog). Running
+  async on Qwen3-Coder-30B-A3B without that stabilizer is known to
+  destabilize MoE expert routing during training and is not a safe
+  next step. Also: while we are still rollout-bound on
+  H200-`.generate()`, the async win is mostly addressed more cheaply
+  by switching to vLLM colocate first.
+- evidence: pre-dispatch planning notes for EXP-002; no results.tsv row.
+- conditions under which it could be revisited: defer until vLLM
+  colocate is in master AND either (a) HF ships MoE-aware "Keep
+  Routing" in AsyncGRPOTrainer, or (b) we move to a dense actor.
+- [note 2026-08-10: the "EXP-002 (vLLM colocate)" referenced in this
+  entry was a draft that never ran; the EXP-002 identifier was later
+  consumed by the Stage-2 SFT run.]
+- provenance: (recovered 2026-08-10 from a stale worktree draft; see
+  archive/worktree-salvage-20260516/)
+
+## 2026-05-16 — D: eval server batching (planner-rejected, never run)
+
+- what was tried: planner proposed batching `/evaluate` requests on
+  the eval server to reduce per-completion HTTP overhead during
+  multi-turn rollouts.
+- why it failed: requires editing `eval_service/` (touches
+  `eval_service/eval_core.py` and `eval_service/app.py`); the
+  worktree workflow is single-file, and the proposal does not yet
+  cleanly fit the one-file change rule because batching changes both
+  the request schema and the timing path. Needs separate scoping
+  before it is dispatchable.
+- evidence: pre-dispatch planning notes for EXP-002; no results.tsv row.
+- conditions under which it could be revisited: scope it as a
+  dedicated eval-service refactor experiment with its own design
+  doc; identify the single batching parameter to flip; ensure
+  comparability-key fields (eval backend, eval split) are unchanged.
+- [note 2026-08-10: the "EXP-002" referenced in this entry was the
+  draft vLLM-colocate experiment, which never ran; the EXP-002
+  identifier was later consumed by the Stage-2 SFT run.]
+- provenance: (recovered 2026-08-10 from a stale worktree draft; see
+  archive/worktree-salvage-20260516/)
+
+## 2026-05-16 — E: Unsloth fast path retry on Qwen3 MoE (planner-rejected, never run)
+
+- what was tried: planner suggested re-enabling Unsloth's
+  FastLanguageModel + PatchFastRL("GRPO") fast path on
+  Qwen3-Coder-30B-A3B-Instruct.
+- why it failed: upstream broken — Unsloth GH issues #3807 and #3422
+  document the Qwen3 MoE fast-path regression. Multiple users have
+  reported the same failure mode; Datta0 has not yet shipped a fix.
+  Retrying it now just consumes a planner slot for a known-bad
+  outcome and burns Explorer GPU-hours we don't have.
+- evidence: Unsloth GH #3807, #3422; the very reason EXP-001 falls
+  back to vanilla Transformers + PEFT.
+- conditions under which it could be revisited: only after Datta0
+  ships a Qwen3 MoE fix in mainline Unsloth. When that happens, pin
+  the exact Unsloth version that contains the fix in `pyproject.toml`
+  / `requirements*.txt`, and only then propose a re-enable experiment.
+- provenance: (recovered 2026-08-10 from a stale worktree draft; see
+  archive/worktree-salvage-20260516/)
+
 ## 2026-05-17 — doubleGraph WCC SFT for ops6k Tensor-return tasks
 
 - what was tried: warm-start Stage 1 GRPO on the mixed Stage 1 task pool
@@ -502,3 +585,27 @@ reward distribution in EXP-008 must be re-tested after the bypass fix.
   also: the B5 "multi-turn attribution bug — concat prompt_ids across
   turns" hypothesis cannot bite under TRL 0.29 because the multi-turn
   loop never runs; do not re-propose B5 against this trainer.
+
+## 2026-08-11 — Silent task-pool fallback: Ops-6K load failure downgrades Stage 1 to 3 WCC prompts
+
+- what was tried: exp018c v1/v2 (slurm 7359525, 7365795) — Stage-1 GRPO
+  launches intended to run on the ops6k task pool.
+- why it failed: the launcher caught the Ops-6K load exception and
+  substituted a different task pool without failing the job — stdout shows
+  `Could not load Ops-6K for Stage 1: ...` immediately followed by
+  `Using fallback Stage 1 prompts with live WCC evaluation support`, after
+  which training proceeded on 3 WCC prompts. Two runs measured the wrong
+  thing, and the substitution was only visible in stdout (v1's load error:
+  `invalid literal for int() with base 10: 'trivial'`; v2's: `cannot mix
+  list and non-list, non-null values`).
+- evidence:
+  `research/audits/evidence-june-018c/kf_exp018c_7359525.out` and
+  `research/audits/evidence-june-018c/kf_exp018c_7365795.out`
+  (results.tsv rows EXP-018c-v1-verify, EXP-018c-v2-verify).
+- conceptual family ruled out: **any launcher path that continues after
+  the intended task pool fails to load**.
+- mitigation shipped: 2026-08-11 hard-fail in the Stage-1 loader unless
+  `KERNELFORGE_ALLOW_POOL_FALLBACK=1` (a coordinator is landing this
+  concurrently with this entry).
+- conditions under which it could be revisited: none — hard-fails are
+  strictly better here.

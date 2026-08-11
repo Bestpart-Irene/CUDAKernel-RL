@@ -4,7 +4,10 @@
 
 The user's design (distinct from PRD verbatim) makes 9 innovations, of which 6
 have internal contradictions identified on 2026-05-30. The three "MUST" ones
-are A, B, D in `research/notes.md` 2026-05-30 audit, all rooted in the same
+are A, B, D in `research/notes.md` 2026-05-30 audit [2026-08-10 note: this
+2026-05-30 audit was never ledgered in notes.md — the citation is preserved
+for history but has no ledger anchor; see
+research/audits/2026-08-10-planner-plan-coherence.md §4.], all rooted in the same
 structural split: novel reward / SFT / anti-hack mechanisms are
 WCC-extern-"C"-centric, but the live experimental task pool is ops6k-cpp_extension-
 centric. The two paths never reach each other.
@@ -134,7 +137,9 @@ already work in isolation (I3, I8) or presuppose this campaign succeeds
   (verification-phase, not promotion-eligible).
 - **touches reward**: no.
 
-### EXP-018d — Promotion-eligible repeat on Northflank A100 (only if EXP-018c PASSES)
+### EXP-018e — Promotion-eligible repeat on Northflank A100 (renumbered from 018d on 2026-08-10)
+
+Note (2026-08-10): the EXP-018d identifier was consumed on 2026-08-03 by the unrelated prompt-migration bugfix (research/experiments/EXP-018d-contract-migration.md, commit fc6c8f1); this promotion rerun is renumbered EXP-018e to keep ledger references unambiguous.
 
 - **hypothesis**: the EXP-018c result reproduces on Northflank-managed
   CoreWeave A100 (not H200 local subprocess) under identical config,
@@ -177,7 +182,7 @@ EXP-018c run.
 
 ## What success at the campaign level looks like
 
-If EXP-018a → 018b → 018c PASSES → 018d PASSES, the user's stated
+If EXP-018a → 018b → 018c PASSES → 018e PASSES, the user's stated
 design innovations (I1, I2, I4, I5, I6 in their extern-"C" form) have
 been demonstrated to produce a non-flat training curve on real A100
 timing under a closed-channel evaluator. This is the first
