@@ -39,6 +39,29 @@ import os as _os
 _REWARD_VERSION = _os.getenv("KERNELFORGE_REWARD_VERSION", "v3-symbol-shaped").strip()
 
 
+def _finite_speedup(value: object, label: str) -> float:
+    """Return ``value`` as a finite float, or 0.0 ("no speedup measured").
+
+    EXP-019 fix (a): ``compute_reward`` is reachable without passing through
+    ``validate_eval_result`` (e.g. ``training/task_support.compute_task_reward``
+    forwards ``float(... or 0.0)``, which lets ``inf`` straight through).
+    ``float('inf') > 1.05`` is True, so a corrupted timing measurement used to
+    map to reward 3.0. Non-finite / non-numeric speedups must instead behave
+    exactly like "no speedup was measured" → correctness tier.
+    """
+    try:
+        f = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        f = float("nan")
+    if not math.isfinite(f):
+        print(
+            f"[COMPUTE_REWARD] non-finite speedup clamped: {label}={value!r} -> 0.0",
+            flush=True,
+        )
+        return 0.0
+    return f
+
+
 def compute_reward(
     compiled: bool,
     correct: bool,
@@ -77,6 +100,10 @@ def compute_reward(
          0.0  if compiled, correct=False, but symbol DID load (numerically wrong)
          1/2/3 on the speedup ladder.
     """
+    # EXP-019 fix (a): guard the tier ladder against NaN/inf speedups at the
+    # last line of defense, regardless of which entry path was used.
+    speedup_vs_eager = _finite_speedup(speedup_vs_eager, "speedup_vs_eager")
+    speedup_vs_compile = _finite_speedup(speedup_vs_compile, "speedup_vs_compile")
     # EXP-009 diagnostic: confirm reward chain is reached and which version is active.
     print(
         f"[COMPUTE_REWARD] compiled={compiled} correct={correct} "

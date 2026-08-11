@@ -56,5 +56,8 @@ def test_forbidden_symbols_list():
 
 def test_scan_nonexistent_path():
     result = scan_forbidden_symbols("/nonexistent/path.so")
-    # Should not raise; returns None or a failure string
-    assert result is None or isinstance(result, str)
+    # EXP-019 fix (c): a missing binary must FAIL CLOSED with a recorded
+    # reason, never silently pass. (This test previously tolerated the old
+    # buggy behavior of returning None.)
+    assert isinstance(result, str)
+    assert "hack_suspected" in result
