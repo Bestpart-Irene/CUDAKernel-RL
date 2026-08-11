@@ -69,11 +69,6 @@ openenv = [
 modal = [
     "modal>=0.70",
 ]
-viz = [
-    "streamlit>=1.28.0",
-    "plotly>=5.17.0",
-    "pandas>=2.1.0",
-]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
@@ -100,9 +95,6 @@ all = [
 [tool.uv]
 dev-dependencies = [
     "modal>=0.70",
-    "streamlit>=1.28.0",
-    "plotly>=5.17.0",
-    "pandas>=2.1.0",
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "black>=23.9.0",
@@ -125,7 +117,6 @@ Repository = "https://github.com/OCWC22/H100-Kernel-RL.git"
 
 [project.scripts]
 kernelforge-train = "training.grpo_train:main"
-kernelforge-demo = "demo.streamlit_demo:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -135,7 +126,6 @@ include = [
     "evaluation*",
     "verification*",
     "datasets*",
-    "demo*",
     "kernels*",
     "eval_service*",
 ]
@@ -204,8 +194,6 @@ module = [
     "trl.*",
     "transformers.*",
     "networkx.*",
-    "plotly.*",
-    "streamlit.*",
 ]
 ignore_missing_imports = true
 
