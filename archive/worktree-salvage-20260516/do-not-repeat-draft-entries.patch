@@ -1,0 +1,92 @@
+diff --git a/research/do-not-repeat.md b/research/do-not-repeat.md
+index 01b893c..3683fcc 100644
+--- a/research/do-not-repeat.md
++++ b/research/do-not-repeat.md
+@@ -19,4 +19,68 @@ managed run fails or regresses in a way that is not just noise.
+ 
+ ## Entries
+ 
+-_(empty — first ruled-out hypothesis will land below)_
++### 2026-05-16 — B: combined beta + max_prompt_length + max_completion_length tweak (planner-rejected, not yet run)
++
++- what was tried: planner originally proposed a single experiment that
++  changed `beta`, `max_prompt_length`, and `max_completion_length`
++  simultaneously on top of the EXP-001 baseline.
++- why it failed: violates the one-variable rule — three coupled knobs
++  in one run produces no actionable signal. Must be split into three
++  separate single-variable experiments **after vLLM colocate lands in
++  master**, because rollout-backend differences dominate the wall-clock
++  and reward picture today.
++- evidence: pre-dispatch planning notes for EXP-002; no results.tsv row.
++- conditions under which it could be revisited: only after EXP-002
++  (vLLM colocate) is in master, and only as three split experiments
++  with EXP-002's master as parent.
++
++### 2026-05-16 — C: async H200↔A100 pipelining via AsyncGRPOTrainer
++
++- what was tried: planner proposed running rollout async on H200 while
++  the optimizer step proceeds on A100 (or vice versa) to overlap the
++  long rollout latency with policy update compute.
++- why it failed: AsyncGRPOTrainer's "Keep Routing" stabilizer is not
++  implemented for MoE actors (HF async-rl-landscape blog). Running
++  async on Qwen3-Coder-30B-A3B without that stabilizer is known to
++  destabilize MoE expert routing during training and is not a safe
++  next step. Also: while we are still rollout-bound on
++  H200-`.generate()`, the async win is mostly addressed more cheaply
++  by switching to vLLM colocate first.
++- evidence: pre-dispatch planning notes for EXP-002; no results.tsv row.
++- conditions under which it could be revisited: defer until vLLM
++  colocate is in master AND either (a) HF ships MoE-aware "Keep
++  Routing" in AsyncGRPOTrainer, or (b) we move to a dense actor.
++
++### 2026-05-16 — D: eval server batching
++
++- what was tried: planner proposed batching `/evaluate` requests on
++  the eval server to reduce per-completion HTTP overhead during
++  multi-turn rollouts.
++- why it failed: requires editing `eval_service/` (touches
++  `eval_service/eval_core.py` and `eval_service/app.py`); the
++  worktree workflow is single-file, and the proposal does not yet
++  cleanly fit the one-file change rule because batching changes both
++  the request schema and the timing path. Needs separate scoping
++  before it is dispatchable.
++- evidence: pre-dispatch planning notes for EXP-002; no results.tsv row.
++- conditions under which it could be revisited: scope it as a
++  dedicated eval-service refactor experiment with its own design
++  doc; identify the single batching parameter to flip; ensure
++  comparability-key fields (eval backend, eval split) are unchanged.
++
++### 2026-05-16 — E: Unsloth fast path retry on Qwen3 MoE
++
++- what was tried: planner suggested re-enabling Unsloth's
++  FastLanguageModel + PatchFastRL("GRPO") fast path on
++  Qwen3-Coder-30B-A3B-Instruct.
++- why it failed: upstream broken — Unsloth GH issues #3807 and #3422
++  document the Qwen3 MoE fast-path regression. Multiple users have
++  reported the same failure mode; Datta0 has not yet shipped a fix.
++  Retrying it now just consumes a planner slot for a known-bad
++  outcome and burns Explorer GPU-hours we don't have.
++- evidence: Unsloth GH #3807, #3422; the very reason EXP-001 falls
++  back to vanilla Transformers + PEFT.
++- conditions under which it could be revisited: only after Datta0
++  ships a Qwen3 MoE fix in mainline Unsloth. When that happens, pin
++  the exact Unsloth version that contains the fix in `pyproject.toml`
++  / `requirements*.txt`, and only then propose a re-enable experiment.
+diff --git a/scripts/cluster/kf_stage1.slurm b/scripts/cluster/kf_stage1.slurm
+index 89e95d4..6065958 100755
+--- a/scripts/cluster/kf_stage1.slurm
++++ b/scripts/cluster/kf_stage1.slurm
+@@ -46,6 +46,13 @@ trap on_term SIGTERM SIGINT
+ # H200 141GB fits Qwen3-Coder-30B-A3B at bf16 with vLLM/GRPO headroom.
+ export KERNELFORGE_QUANT_BITS="${KERNELFORGE_QUANT_BITS:-0}"
+ 
++# EXP-002: switch rollout backend from HF .generate() to vLLM colocate.
++# colocate mode is mandatory — server mode breaks multi-turn GRPO importance
++# sampling (TRL #4543). util=0.18 is the budgeted vLLM share after bf16
++# 30B-A3B actor (~61GB) + LoRA grads (~2GB) + activations on H200 80GB.
++export KERNELFORGE_USE_VLLM=1
++export KERNELFORGE_VLLM_GPU_MEMORY_UTILIZATION=0.18
++
+ # Override cluster_paths.sh's default (local) — we are using remote A100 eval.
+ export KERNELFORGE_EVAL_BACKEND=coreweave
+ 
