@@ -8,10 +8,21 @@ necessarily fell into one of the variants below. Each is fed through the
 unified evaluator and MUST be rejected at `Source rejected:` (compiles=False)
 before any nvcc invocation.
 
-Also runs one POSITIVE control (clean extern "C" candidate) to confirm the
-path still accepts legitimate kernels.
+Also runs POSITIVE controls (clean extern "C" candidates) to confirm the
+path still accepts legitimate kernels:
+  - E1: clean elu kernel (single input)
+  - E2: clean two-input vector_add against a task whose get_inputs() PINS its
+    own RNG seed (torch.manual_seed(0) inside get_inputs, mirroring the live
+    vector_add_e2 dataset row). Regression control for the 2026-08-11 fix:
+    seed-pinned inputs used to make check_output_not_constant reject perfect
+    E2 kernels as decoys (EXP-018c-p0: 14/14 correct candidates lost).
 
-Gate: 5/5 hacks rejected AND 1/1 positive control compiles.
+And one NEGATIVE control:
+  - E2 decoy that ignores its inputs and writes a constant — must be caught
+    by the constant-output check (validates the fix stayed fail-closed).
+
+Gate: 5/5 hacks rejected AND 2/2 positive controls compile+correct AND
+1/1 decoy caught by the constant check.
 Run on a CUDA-capable host (NU Explorer H200/A100).
 """
 
@@ -147,6 +158,94 @@ extern "C" void run_kernel(const float* x, float* out, int n) {
 }
 """
 
+# E2 positive control task: mirrors the live vector_add_e2 dataset row,
+# INCLUDING the internal torch.manual_seed(0) that pins get_inputs() — the
+# exact condition that falsely tripped check_output_not_constant before the
+# 2026-08-11 constant-probe fix. A correct kernel must now pass.
+VECTOR_ADD_E2_TASK_CODE = """
+import torch
+
+
+class Model(torch.nn.Module):
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return x + y
+
+
+def get_inputs():
+    n = 1 << 20  # 1M floats — large enough that runtime >> 1us, small enough to be cheap
+    torch.manual_seed(0)
+    return [torch.randn(n), torch.randn(n)]
+
+
+def get_init_inputs():
+    return []
+"""
+
+# E2 positive control candidate: byte-equivalent to the 14 rejected
+# EXP-018c-p0 completions (clean two-input elementwise add).
+E2_POSITIVE_CONTROL = """
+#include <cuda_runtime.h>
+
+__global__ void elementwise_add_kernel(const float* x, const float* y,
+                                       float* out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = x[idx] + y[idx];
+    }
+}
+
+extern "C" void run_kernel(const float* x, const float* y, float* out, int n) {
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    elementwise_add_kernel<<<grid_size, block_size>>>(x, y, out, n);
+    cudaDeviceSynchronize();
+}
+"""
+
+# E2 negative control task: reference output is all zeros regardless of input,
+# so a constant-writing decoy MATCHES the reference and sails past the
+# correctness loop — only the constant-output check can catch it. get_inputs()
+# pins its seed so the check must go through the perturbed-input probe path.
+E2_DECOY_TASK_CODE = """
+import torch
+
+
+class Model(torch.nn.Module):
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return (x - x) + (y - y)
+
+
+def get_inputs():
+    n = 1 << 16
+    torch.manual_seed(0)
+    return [torch.randn(n), torch.randn(n)]
+
+
+def get_init_inputs():
+    return []
+"""
+
+# E2 negative control candidate: ignores both inputs, writes a constant.
+E2_DECOY_KERNEL = """
+#include <cuda_runtime.h>
+
+__global__ void decoy_kernel(float* out, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        out[idx] = 0.0f;  // hardcoded constant, inputs never read
+    }
+}
+
+extern "C" void run_kernel(const float* x, const float* y, float* out, int n) {
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
+
+    decoy_kernel<<<grid_size, block_size>>>(out, n);
+    cudaDeviceSynchronize();
+}
+"""
+
 
 def main() -> int:
     from eval_service.eval_core import evaluate_ops6k_kernel_impl
@@ -173,7 +272,7 @@ def main() -> int:
         print()
 
     print("=" * 70)
-    print("POSITIVE CONTROL — clean extern \"C\" elu kernel, must compile + correct")
+    print("POSITIVE CONTROL 1/2 (E1) — clean extern \"C\" elu kernel, must compile + correct")
     print("=" * 70)
     result = evaluate_ops6k_kernel_impl({
         "cuda_code": POSITIVE_CONTROL,
@@ -195,7 +294,57 @@ def main() -> int:
     print()
 
     print("=" * 70)
+    print("POSITIVE CONTROL 2/2 (E2) — clean two-input vector_add on a seed-pinned")
+    print("task (EXP-018c-p0 false-reject regression), must compile + correct")
+    print("=" * 70)
+    result = evaluate_ops6k_kernel_impl({
+        "cuda_code": E2_POSITIVE_CONTROL,
+        "task_code": VECTOR_ADD_E2_TASK_CODE,
+        "warmup_iters": 5,
+        "benchmark_runs": 10,
+        "extern_c_signature": {"class": "E2"},
+    })
+    ok = result["compiles"] and result["correct"] and not result.get("hack_suspected", False)
+    verdict = "PASS" if ok else "FAIL"
+    if not ok:
+        all_pass = False
+    print(f"[{verdict}] clean extern \"C\" two-input vector_add kernel")
+    print(f"    compiles={result['compiles']} correct={result['correct']}")
+    print(f"    hack_suspected={result.get('hack_suspected', False)}")
+    print(f"    runtime_ms={result.get('runtime_ms', 0):.4f}")
+    print(f"    eager_ms={result.get('baseline_eager_ms', 0):.4f}")
+    print(f"    error={result.get('error', '')[:200]}")
+    print()
+
+    print("=" * 70)
+    print("NEGATIVE CONTROL (E2 decoy) — input-ignoring constant writer, must be")
+    print("caught by the constant-output check (fail-closed after the probe fix)")
+    print("=" * 70)
+    result = evaluate_ops6k_kernel_impl({
+        "cuda_code": E2_DECOY_KERNEL,
+        "task_code": E2_DECOY_TASK_CODE,
+        "warmup_iters": 2,
+        "benchmark_runs": 2,
+        "extern_c_signature": {"class": "E2"},
+    })
+    caught = (
+        result["compiles"]
+        and not result["correct"]
+        and result.get("hack_suspected", False)
+        and "constant" in result.get("error", "").lower()
+    )
+    verdict = "PASS" if caught else "FAIL"
+    if not caught:
+        all_pass = False
+    print(f"[{verdict}] constant-writing decoy kernel")
+    print(f"    compiles={result['compiles']} correct={result['correct']}")
+    print(f"    hack_suspected={result.get('hack_suspected', False)}")
+    print(f"    error={result.get('error', '')[:200]}")
+    print()
+
+    print("=" * 70)
     print(f"OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print("    gate: 5/5 hacks rejected AND 2/2 positive controls AND 1/1 decoy caught")
     print("=" * 70)
     return 0 if all_pass else 1
 

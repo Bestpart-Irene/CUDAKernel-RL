@@ -705,6 +705,107 @@ def _invoke_candidate(run_kernel_fn, sig_class: str, tensor_inputs: list, out_bu
         raise NotImplementedError(f"Signature class {sig_class} not yet wired")
 
 
+def _tensor_pair_identical(a, b) -> bool:
+    """Bit-identical comparison for two tensor-likes.
+
+    Uses torch.equal for real torch tensors; falls back to numpy for any
+    array-convertible tensor-like so the logic stays unit-testable on
+    torch-less machines.
+    """
+    if getattr(a, "shape", None) != getattr(b, "shape", None):
+        return False
+    try:
+        import torch
+
+        if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+            return a.dtype == b.dtype and bool(torch.equal(a, b))
+    except ImportError:
+        pass
+    return bool(np.array_equal(np.asarray(a), np.asarray(b)))
+
+
+def _tensor_lists_identical(list_a: list, list_b: list) -> bool:
+    """True when two input sets are bit-identical, element by element.
+
+    Empty or length-mismatched sets return False (nothing to probe).
+    """
+    if len(list_a) != len(list_b) or not list_a:
+        return False
+    return all(_tensor_pair_identical(a, b) for a, b in zip(list_a, list_b))
+
+
+def _constant_probe_call(run_kernel_fn, sig_class: str, base_tensor_inputs: list, out_template):
+    """Second candidate invocation for check_output_not_constant, on inputs
+    that are guaranteed to differ from ``base_tensor_inputs``.
+
+    Each input is perturbed by +1.0 (new buffers, every element changed) and
+    the candidate is re-invoked with the standard E1/E2 arg order via
+    _invoke_candidate. The probe output buffer is a CLONE of ``out_template``
+    (the first invocation's output), so a kernel that ignores its inputs —
+    whether it rewrites the same constant or writes nothing at all — still
+    produces an output identical to the first one and is caught by
+    check_output_not_constant. Fail-closed for genuine decoys by construction.
+
+    Returns (probe_output_cpu, probe_inputs) where probe_inputs are the exact
+    tensors whose data_ptrs were handed to the candidate.
+    """
+    probe_inputs = [(t + 1.0).contiguous() for t in base_tensor_inputs]
+    probe_out = out_template.detach().clone()
+    _invoke_candidate(run_kernel_fn, sig_class, probe_inputs, probe_out)
+    if getattr(probe_out, "is_cuda", False):
+        import torch
+
+        torch.cuda.synchronize()
+    return probe_out.cpu(), probe_inputs
+
+
+def _apply_constant_probe_if_inputs_identical(
+    run_kernel_fn,
+    sig_class: str,
+    candidate_outputs: list,
+    inputs_list: list,
+    probe_base_inputs: list,
+    probe_out_template,
+) -> bool:
+    """Guarantee check_output_not_constant's premise: DIFFERENT inputs.
+
+    2026-08-11 E2 false-reject fix (EXP-018c-p0 evidence): the constant-output
+    check compared the seed-0/seed-1 correctness outputs, assuming
+    ``torch.manual_seed(42 + seed)`` varies the task's ``get_inputs()``. A task
+    that pins its own RNG inside get_inputs() (vector_add_e2 calls
+    ``torch.manual_seed(0)`` internally) returns bit-identical inputs for every
+    harness seed, so a PERFECT kernel emitted bit-identical outputs and was
+    rejected as "Output is constant across different inputs" — 14/14 correct
+    two-input vector_add candidates lost. E1 tasks (f_elu, f_softplus) don't
+    pin their RNG, which is why only the E2 probe task was hit.
+
+    When the two anti-hack input sets are bit-identical, re-invoke the
+    candidate once on perturbed inputs (_constant_probe_call) and substitute
+    that output (and input set) as the second sample fed to the check. Real
+    kernels then produce a differing pair and pass; input-ignoring decoys
+    still produce an identical pair and are caught.
+
+    Mutates candidate_outputs / inputs_list in place. Returns True when the
+    probe ran. Raises on probe failure — the caller treats that as a failed
+    anti-hack check (fail closed).
+    """
+    if len(candidate_outputs) < 2 or len(inputs_list) < 2:
+        return False
+    if not _tensor_lists_identical(inputs_list[0], inputs_list[1]):
+        return False
+    if probe_out_template is None or not probe_base_inputs:
+        raise RuntimeError(
+            "constant-output probe unavailable: identical anti-hack inputs but "
+            "no captured seed-0 buffers"
+        )
+    probe_out_cpu, probe_inputs = _constant_probe_call(
+        run_kernel_fn, sig_class, probe_base_inputs, probe_out_template
+    )
+    candidate_outputs[1] = probe_out_cpu
+    inputs_list[1] = [t.detach().cpu() for t in probe_inputs]
+    return True
+
+
 def _run_anti_hack_checks(
     result: dict,
     candidate_outputs: list,
@@ -1038,6 +1139,8 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
         anti_hack_candidate_outputs = []
         anti_hack_ref_outputs = []
         anti_hack_inputs = []
+        probe_base_gpu_inputs: list = []
+        probe_out_template = None
         try:
             for seed in range(5):
                 torch.manual_seed(42 + seed)
@@ -1065,11 +1168,41 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                     anti_hack_candidate_outputs.append(candidate_cpu)
                     anti_hack_ref_outputs.append(ref_cpu)
                     anti_hack_inputs.append([t.cpu() for t in tensor_inputs])
+                if seed == 0:
+                    # Kept alive for the Step-10b constant-output probe:
+                    # the exact GPU input tensors and output buffer of the
+                    # first invocation.
+                    probe_base_gpu_inputs = tensor_inputs
+                    probe_out_template = candidate_output
 
             result["correct"] = True
             result["verifier_msg"] = "Outputs matched reference for 5 random seeds"
         except Exception as exc:
             result["error"] = f"Correctness check failed: {str(exc)[:800]}"
+            result["verifier_msg"] = result["error"]
+            return result
+
+        # === Step 10b: guaranteed-distinct inputs for the constant check ===
+        # If the task pins its own RNG inside get_inputs() the two anti-hack
+        # samples above saw bit-identical inputs, voiding the premise of
+        # check_output_not_constant and falsely rejecting perfect kernels
+        # (EXP-018c-p0: 14/14 correct vector_add_e2 candidates). Detect that
+        # case and re-invoke the candidate once on perturbed inputs so
+        # "different inputs" holds by construction. A probe that cannot run
+        # is a failed check (fail closed — audit finding 2 semantics).
+        try:
+            _apply_constant_probe_if_inputs_identical(
+                run_kernel,
+                sig_class,
+                anti_hack_candidate_outputs,
+                anti_hack_inputs,
+                probe_base_gpu_inputs,
+                probe_out_template,
+            )
+        except Exception as exc:
+            result["correct"] = False
+            result["hack_suspected"] = True
+            result["error"] = f"Anti-hack constant-output probe failed: {str(exc)[:500]}"
             result["verifier_msg"] = result["error"]
             return result
 
