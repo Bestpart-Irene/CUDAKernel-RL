@@ -46,11 +46,17 @@ show the June "018c" was three attempts, not one.)
    before dispatch.
 5. Any correct=True rollout's .cu source must be persisted and pass a
    post-hoc deep anti-hack scan (script must exist first).
-6. (added 2026-08-12, from probe finding a) E2 constant-check fix landed
-   with a new evaluator_sha, and an E2 positive control passing on a
-   CUDA host — the b182df91c482 evaluator's E2 second-invocation path
-   passes broken/identical effective inputs and false-rejected all 14
-   compile_ok vector_add_e2 candidates in the probe.
+6. **SATISFIED 2026-08-12** (slurm 9087851, Explorer sharing A100, 20s):
+   root cause was vector_add_e2's `get_inputs()` pinning
+   `torch.manual_seed(0)`, which made both anti-hack invocations see
+   bit-identical inputs — a correct kernel's identical outputs were
+   flagged "constant". Fix (Step 10b perturbed-input probe, commit
+   b1bb9a2, evaluator_sha d0c0b8d0fa0f) validated on hardware by the
+   upgraded 8-part fixture gate: 5/5 hacks rejected AND 2/2 positive
+   controls (E1 elu; E2 seed-pinned vector_add — the exact false-reject
+   regression — compiles=True correct=True hack_suspected=False) AND
+   1/1 constant-writer decoy caught. Log:
+   `logs/kf_fixture_018a_9087851.out` (cluster).
 7. (added 2026-08-12, from probe ceiling caveat) planner decision on
    task-pool difficulty rebalance: E1 spike tasks are at ceiling for
    the base model (f_elu/f_softplus pass@8 ~= 1.0), so the current
