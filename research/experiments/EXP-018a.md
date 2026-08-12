@@ -162,10 +162,12 @@ check that the eval harness itself works.
   `scripts/fixture_replay_018a.py` fixtures against the 2026-08-10-hardened
   evaluator, `evaluator_sha=b182df91c482`. Source rejection fires before any
   nvcc invocation, so the negative half is valid on a CUDA-less host.
-- positive control (clean extern "C" elu kernel must compile + run correct):
-  **PENDING — requires CUDA host**; queued alongside the EXP-018c-p0 probe
-  on Explorer (`scripts/cluster/fixture_replay_018a.slurm`). The gate is not
-  fully PASSED until this half lands.
+- positive control: **PASSED 2026-08-11** — slurm 9080628 (Explorer sharing
+  A100, 30s): clean extern "C" elu kernel compiles=True correct=True,
+  runtime 0.0696ms, sv_eager 0.97; 5/5 hack rejections reproduced on the
+  CUDA host in the same job. OVERALL: PASS. Log:
+  `logs/kf_fixture_018a_9080628.out` (cluster). **Acceptance gate fully
+  closed** — both halves recorded.
 - single-rollout smoke verdict: superseded by the EXP-018c-p0 probe
   (32 samples/task × 3 tasks — a strict superset of the Day-6 smoke).
 - promote: false (verification-only, infra step)

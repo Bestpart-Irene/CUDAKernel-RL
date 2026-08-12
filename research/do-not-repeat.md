@@ -609,3 +609,30 @@ reward distribution in EXP-008 must be re-tested after the bypass fix.
   concurrently with this entry).
 - conditions under which it could be revisited: none — hard-fails are
   strictly better here.
+
+## 2026-08-12 — Single-signature-class positive control cannot validate the other class
+
+- what was tried: the 2026-08-10 evaluator hardening (evaluator_sha
+  b182df91c482) was accepted with only an E1 (elu) positive control;
+  the E2 path was never exercised against a known-good kernel.
+- why it failed: the E2 second-invocation path shipped broken — it
+  passes broken/identical effective inputs, so the "Output is constant
+  across different inputs" anti-hack check false-rejects correct E2
+  kernels. In the EXP-018c-p0 probe this cost 14 false rejections: all
+  14 vector_add_e2 compile_ok candidates were textbook-correct
+  two-input add kernels, rejected to correct=0/32 on that task.
+  Fail-closed (no false positives), but a broken-by-construction
+  measurement of the only E2 task in the spike pool.
+- evidence: EXP-018c-p0-verify (slurm 9080627) in results.tsv;
+  research/audits/evidence-probe-018c-p0/{summary.json,
+  completions.jsonl}; notes.md 2026-08-12 entry, finding (a).
+- conceptual family ruled out: **accepting any evaluator change without
+  a positive control per live signature class (E1 AND E2)**. A passing
+  control in one class says nothing about the other class's invocation
+  path.
+- mitigation: E2 positive controls are being added to
+  fixture_replay_018a concurrently with this entry; the E2
+  constant-check fix lands with a new evaluator_sha (018c rerun
+  precondition 6).
+- conditions under which it could be revisited: none — per-class
+  positive controls are strictly better here.

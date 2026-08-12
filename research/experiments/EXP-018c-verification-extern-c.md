@@ -33,6 +33,10 @@ show the June "018c" was three attempts, not one.)
 ## Rerun preconditions (from 2026-08-10 audit)
 
 1. EXP-018c-p0 base pass@k probe decides cold-start vs EXP-018b.
+   **SATISFIED 2026-08-12** — probe verdict COLD-START LICENSED
+   (pooled p(parse+compile)=0.812 [0.723, 0.878] vs threshold 0.05),
+   slurm 9080627, finished 2026-08-12T04:43Z. See results.tsv row
+   EXP-018c-p0-verify and notes.md 2026-08-12 entry.
 2. 5/5 hacked-fixture replay executed and recorded in EXP-018a.md Run
    section.
 3. Launcher rewritten — pass criteria matched to actual step count,
@@ -42,6 +46,17 @@ show the June "018c" was three attempts, not one.)
    before dispatch.
 5. Any correct=True rollout's .cu source must be persisted and pass a
    post-hoc deep anti-hack scan (script must exist first).
+6. (added 2026-08-12, from probe finding a) E2 constant-check fix landed
+   with a new evaluator_sha, and an E2 positive control passing on a
+   CUDA host — the b182df91c482 evaluator's E2 second-invocation path
+   passes broken/identical effective inputs and false-rejected all 14
+   compile_ok vector_add_e2 candidates in the probe.
+7. (added 2026-08-12, from probe ceiling caveat) planner decision on
+   task-pool difficulty rebalance: E1 spike tasks are at ceiling for
+   the base model (f_elu/f_softplus pass@8 ~= 1.0), so the current
+   3-task pool would measure almost nothing; target tasks with low
+   pass@1 but nonzero pass@32, or gate on E2/vector_add improvement
+   after the harness fix.
 
 ## Run
 

@@ -689,3 +689,59 @@ The path forward is no longer "try another knob". It is one of:
   produced occasional variance (three small grad_norm blips) but never
   gradient traction under G=2. v3 empirically reproduces the EXP-001
   cold-start collapse family under the newer reward/evaluator stack.
+
+## 2026-08-12 — EXP-018c-p0 — cold-start probe PASSES; first adversarially-clean correct kernels
+
+- hypothesis: the base model on the EXP-018d migrated extern-C prompts
+  clears the do-not-repeat 2026-05-16 revisit condition
+  (p(valid candidate) >= 0.05), licensing a cold-start 018c rerun.
+- parent master hash: null
+- variable changed: none (measurement probe, no training) — base model
+  sampled on the 3-task spike pool under migrated prompts + frozen
+  evaluator; direct answer to "did the EXP-018d prompt migration change
+  what the base model emits".
+- runner / job id: explorer-h200 / slurm 9080627 (finished
+  2026-08-12T04:43Z; 7h07m walltime incl. 61GB model download,
+  generation ~3.5h)
+- config: base Qwen/Qwen3-Coder-30B-A3B-Instruct, NO SFT/LoRA (pure
+  base), migrated extern-C prompts, 32 samples/task, temperature 1.0,
+  max_new_tokens 2048, single-turn, frozen evaluator sha b182df91c482,
+  eval_backend=local. Evidence: research/audits/evidence-probe-018c-p0/
+  {summary.json, completions.jsonl}.
+- metrics (per-task p(parse+compile) [Wilson 95%], correct):
+  - vector_add_e2: 0.438 [0.282, 0.607], correct 0/32
+  - f_elu: 1.000 [0.893, 1.0], correct 32/32
+  - f_softplus: 1.000 [0.893, 1.0], correct 29/32
+  - POOLED: p(parse+compile)=0.812 [0.723, 0.878],
+    p(correct)=0.635 [0.536, 0.725], pass@8=0.9998
+- decision: no-promote (verification probe, computes no reward). VERDICT:
+  COLD-START LICENSED (threshold 0.05) — pooled lower bound 0.723 clears
+  it by 14x. All 61 correct completions passed
+  scripts/deep_hack_scan.py (61/61 clean, exit 0) — the first
+  adversarially-verified correct kernels in project history.
+- finding (a) — E2 HARNESS BUG: all 14 vector_add_e2
+  compile_ok-but-wrong candidates are textbook-correct two-input add
+  kernels rejected by "Anti-hack: Output is constant across different
+  inputs". The hardened evaluator's E2 second-invocation path passes
+  broken/identical effective inputs. Fail-closed, so no false positives
+  — but it cost 14 false rejections. A concurrent fix is landing with a
+  new evaluator_sha, and an E2 positive control is being added to the
+  fixture replay.
+- finding (b) — MODEL WEAKNESS: all 18 vector_add_e2 compile_fails nest
+  `__global__` inside the host run_kernel — an E2-prompt-specific
+  syntax-failure family in the base model.
+- interpretation: the do-not-repeat 2026-05-16 revisit condition
+  (p(valid) >= 0.05) is SATISFIED — a cold-start 018c rerun is now
+  ledger-legal. The migration explanation holds: June's v3 run drowned
+  in `Source rejected: #include <torch/`; under migrated prompts the
+  same base model parses+compiles at 0.812 and is outright correct at
+  0.635 pooled. vector_add_e2's 0/32 correct is fully explained by
+  finding (a) (harness) plus finding (b) (model), not by the contract.
+
+  Ceiling caveat (changes what the 018c rerun should look like): the E1
+  spike tasks are at/near ceiling for the base model (pass@8 ~= 1.0 on
+  f_elu and f_softplus), so a 50-step GRPO on this 3-task pool would
+  start at ceiling on 2 of 3 tasks and measure almost nothing. Before
+  dispatching the 018c rerun, planner must rebalance task difficulty
+  (target tasks with low pass@1 but nonzero pass@32 — learnable
+  headroom) or gate on E2/vector_add improvement after the harness fix.

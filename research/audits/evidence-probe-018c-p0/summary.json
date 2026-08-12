@@ -1,0 +1,114 @@
+{
+  "experiment": "EXP-018c-p0",
+  "partial": false,
+  "interrupted_by_signal": null,
+  "samples_per_task_target": 32,
+  "temperature": 1.0,
+  "max_new_tokens": 2048,
+  "threshold": 0.05,
+  "task_substitutions": [],
+  "per_task": {
+    "vector_add_e2": {
+      "n": 32,
+      "buckets": {
+        "compile_ok": 14,
+        "compile_fail": 18
+      },
+      "parse_compile": 14,
+      "p_parse_compile": 0.4375,
+      "p_parse_compile_wilson95": [
+        0.28165331009809136,
+        0.6067440898724937
+      ],
+      "symbol_present": 14,
+      "correct": 0,
+      "p_correct": 0.0,
+      "p_correct_wilson95": [
+        0.0,
+        0.10717919976468034
+      ],
+      "pass_at_k_correct": {
+        "pass@1": 0.0,
+        "pass@8": 0.0,
+        "pass@32": 0.0
+      }
+    },
+    "f_elu": {
+      "n": 32,
+      "buckets": {
+        "correct": 32
+      },
+      "parse_compile": 32,
+      "p_parse_compile": 1.0,
+      "p_parse_compile_wilson95": [
+        0.8928208002353198,
+        1.0
+      ],
+      "symbol_present": 32,
+      "correct": 32,
+      "p_correct": 1.0,
+      "p_correct_wilson95": [
+        0.8928208002353198,
+        1.0
+      ],
+      "pass_at_k_correct": {
+        "pass@1": 1.0,
+        "pass@8": 1.0,
+        "pass@32": 1.0
+      }
+    },
+    "f_softplus": {
+      "n": 32,
+      "buckets": {
+        "correct": 29,
+        "compile_ok": 3
+      },
+      "parse_compile": 32,
+      "p_parse_compile": 1.0,
+      "p_parse_compile_wilson95": [
+        0.8928208002353198,
+        1.0
+      ],
+      "symbol_present": 32,
+      "correct": 29,
+      "p_correct": 0.90625,
+      "p_correct_wilson95": [
+        0.7578184512368681,
+        0.9675984489543291
+      ],
+      "pass_at_k_correct": {
+        "pass@1": 0.90625,
+        "pass@8": 1.0,
+        "pass@32": 1.0
+      }
+    }
+  },
+  "pooled": {
+    "n": 96,
+    "buckets": {
+      "compile_ok": 17,
+      "compile_fail": 18,
+      "correct": 61
+    },
+    "parse_compile": 78,
+    "p_parse_compile": 0.8125,
+    "p_parse_compile_wilson95": [
+      0.7229774566977561,
+      0.8779753005264296
+    ],
+    "symbol_present": 78,
+    "correct": 61,
+    "p_correct": 0.6354166666666666,
+    "p_correct_wilson95": [
+      0.5356522616752782,
+      0.7247605997885355
+    ],
+    "pass_at_k_correct": {
+      "pass@1": 0.6354166666666667,
+      "pass@8": 0.9998225064886407,
+      "pass@32": 1.0
+    }
+  },
+  "verdict": "COLD-START LICENSED (p>=0.05)",
+  "ci_note": ""
+}
